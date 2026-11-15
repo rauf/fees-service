@@ -5,7 +5,7 @@ services:
       - server
       - start-dev
       - --ip=0.0.0.0
-      - --db-filename=/data/temporal.db
+      - --db-filename=/home/temporal/temporal.db
       - --search-attribute=CustomerID=Keyword
       - --search-attribute=BillStatus=Keyword
       - --search-attribute=BillCurrency=Keyword
@@ -14,8 +14,21 @@ services:
     ports:
       - "7233:7233"
       - "8233:8233"
+    # Mounted on the image user's home so the volume inherits its ownership; /data would be root-owned.
     volumes:
-      - temporal-data:/data
+      - temporal-data:/home/temporal
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health"]
+      interval: 2s
+      retries: 30
+
+  # The dev server has no retention flag; a completed bill stays queryable for this long.
+  temporal-retention:
+    image: temporalio/temporal:1.10.1
+    command: ["operator", "namespace", "update", "--namespace=default", "--retention=365d", "--address=temporal:7233"]
+    depends_on:
+      temporal:
+        condition: service_healthy
 
 volumes:
   temporal-data:

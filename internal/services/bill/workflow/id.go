@@ -18,7 +18,7 @@ func BillID(customerID, period string) string {
 
 // ValidateNew reports whether a bill can be opened at now: only for the current or a future month.
 func ValidateNew(in BillInput, now time.Time) error {
-	if !customerIDPattern.MatchString(in.CustomerID) {
+	if !ValidCustomerID(in.CustomerID) {
 		return fmt.Errorf("%w: customerId must match %s", ErrInvalidBill, customerIDPattern)
 	}
 
@@ -40,6 +40,18 @@ func ValidateNew(in BillInput, now time.Time) error {
 	}
 
 	return nil
+}
+
+// ValidCustomerID reports whether id can name a customer in a bill ID.
+func ValidCustomerID(id string) bool {
+	return customerIDPattern.MatchString(id)
+}
+
+// ValidPeriod reports whether period is a YYYY-MM month.
+func ValidPeriod(period string) bool {
+	_, err := periodStart(period)
+
+	return err == nil
 }
 
 // periodStart parses a "YYYY-MM" period into the first instant of that UTC month.
