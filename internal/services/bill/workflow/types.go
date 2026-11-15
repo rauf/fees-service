@@ -18,9 +18,6 @@ type BillInput struct {
 	// GracePeriod is how long after the period ends the bill closes itself if no close signal
 	// arrives. Zero means DefaultGracePeriod.
 	GracePeriod time.Duration `json:"gracePeriod,omitempty"`
-	// ContinueAsNewAfter forces continue-as-new after this many line items in one run; zero
-	// leaves it to the server's suggestion.
-	ContinueAsNewAfter int `json:"continueAsNewAfter,omitempty"`
 	// Resume carries the bill into the next run on continue-as-new.
 	Resume *domain.Bill `json:"resume,omitempty"`
 }
@@ -29,8 +26,11 @@ type BillInput struct {
 const (
 	TaskQueue         = "fees"
 	UpdateAddLineItem = "addLineItem"
-	SignalClose       = "close"
-	QueryGetBill      = "getBill"
+	// UpdateClose and SignalClose both close a bill: the update answers with the total, the signal
+	// is fire-and-forget for batch closers.
+	UpdateClose  = "closeBill"
+	SignalClose  = "close"
+	QueryGetBill = "getBill"
 )
 
 const DefaultGracePeriod = 7 * 24 * time.Hour

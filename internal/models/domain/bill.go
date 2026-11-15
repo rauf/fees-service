@@ -71,3 +71,13 @@ const (
 	CloseReasonManual             CloseReason = "manual"
 	CloseReasonGracePeriodExpired CloseReason = "grace_period_expired"
 )
+
+// Valid reports whether s is a known status.
+func (s Status) Valid() bool {
+	switch s {
+	case StatusOpen, StatusClosing, StatusCharging, StatusCharged, StatusChargeFailed:
+		return true
+	default:
+		return false
+	}
+}

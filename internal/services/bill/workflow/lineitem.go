@@ -14,6 +14,21 @@ import (
 	"github.com/rauf/fees-service/internal/money"
 )
 
+// clockSkew tolerates a caller whose clock runs slightly ahead of the worker's.
+const clockSkew = 5 * time.Second
+
+// CheckAddToFinished decides an add to a bill whose workflow has completed, where the update
+// validator can no longer answer. It gives the same answer the validator would have.
+func CheckAddToFinished(bill domain.Bill, in domain.LineItemInput) error {
+	for _, item := range bill.Items {
+		if item.ID == in.ID {
+			return checkRetry(item, in)
+		}
+	}
+
+	return billClosedError(bill.Status)
+}
+
 func (s *billState) validateLineItem(ctx workflow.Context, in domain.LineItemInput) error {
 	return s.checkAdd(workflow.Now(ctx), in)
 }
@@ -22,16 +37,11 @@ func (s *billState) validateLineItem(ctx workflow.Context, in domain.LineItemInp
 // the bill is accepted even once the bill is closed, so a retry gets the answer the original got.
 func (s *billState) checkAdd(now time.Time, in domain.LineItemInput) error {
 	if i, ok := s.index[in.ID]; ok {
-		if !SamePayload(s.bill.Items[i], in) {
-			return temporal.NewApplicationError(
-				fmt.Sprintf("line item %q already exists with different details", in.ID), ErrTypeLineItemConflict)
-		}
-
-		return nil
+		return checkRetry(s.bill.Items[i], in)
 	}
 
 	if s.bill.Status != domain.StatusOpen {
-		return temporal.NewApplicationError(fmt.Sprintf("bill is %s", s.bill.Status), ErrTypeBillClosed)
+		return billClosedError(s.bill.Status)
 	}
 
 	if err := s.checkLineItem(now, in); err != nil {
@@ -52,21 +62,30 @@ func (s *billState) checkLineItem(now time.Time, in domain.LineItemInput) error 
 	}
 
 	if _, err := in.Amount.Currency.Exponent(); err != nil {
-		return err
+		return fmt.Errorf("amount: %w", err)
 	}
 
-	if at := in.OccurredAt; at != nil {
-		if at.Before(s.periodStart) || !at.Before(s.periodEnd) {
-			return fmt.Errorf("occurredAt %s is outside period %s", at.UTC().Format(time.RFC3339), s.bill.Period)
+	// A defaulted occurredAt must fall in the period too, or a fee would land on the wrong month's
+	// bill and be converted at a rate from outside it.
+	at := now
+	if in.OccurredAt != nil {
+		at = *in.OccurredAt
+	}
+
+	if at.Before(s.periodStart) || !at.Before(s.periodEnd) {
+		if in.OccurredAt == nil {
+			return fmt.Errorf("now is outside period %s; pass occurredAt within it", s.bill.Period)
 		}
 
-		if at.After(now) {
-			return fmt.Errorf("occurredAt %s is in the future", at.UTC().Format(time.RFC3339))
-		}
+		return fmt.Errorf("occurredAt %s is outside period %s", at.UTC().Format(time.RFC3339), s.bill.Period)
+	}
+
+	if at.After(now.Add(clockSkew)) {
+		return fmt.Errorf("occurredAt %s is in the future", at.UTC().Format(time.RFC3339))
 	}
 
 	if _, err := s.subtotal(in.Amount.Currency).Add(in.Amount); err != nil {
-		return err
+		return fmt.Errorf("%s subtotal: %w", in.Amount.Currency, err)
 	}
 
 	return nil
@@ -97,7 +116,6 @@ func (s *billState) addLineItem(ctx workflow.Context, in domain.LineItemInput) (
 		OccurredAt:  occurredAt,
 		AddedAt:     now,
 	})
-	s.addedThisRun++
 
 	return s.bill, nil
 }
@@ -125,10 +143,19 @@ func (s *billState) setSubtotal(m money.Money) {
 	slices.SortFunc(s.bill.Subtotals, func(a, b money.Money) int { return strings.Compare(string(a.Currency), string(b.Currency)) })
 }
 
-// SamePayload reports whether in is a retry of item. It ignores OccurredAt when the retry omits
-// it: the original defaulted it to the time it was added, which a retry cannot reproduce.
-func SamePayload(item domain.LineItem, in domain.LineItemInput) bool {
-	return item.Description == in.Description &&
-		item.Amount == in.Amount &&
-		(in.OccurredAt == nil || item.OccurredAt.Equal(*in.OccurredAt))
+// checkRetry accepts an identical retry of item and refuses an ID reused for a different fee. It
+// ignores OccurredAt when the retry omits it: the original defaulted it to the time it was added,
+// which a retry cannot reproduce.
+func checkRetry(item domain.LineItem, in domain.LineItemInput) error {
+	if item.Description == in.Description && item.Amount == in.Amount &&
+		(in.OccurredAt == nil || item.OccurredAt.Equal(*in.OccurredAt)) {
+		return nil
+	}
+
+	return temporal.NewApplicationError(
+		fmt.Sprintf("line item %q already exists with different details", in.ID), ErrTypeLineItemConflict)
+}
+
+func billClosedError(status domain.Status) error {
+	return temporal.NewApplicationError(fmt.Sprintf("bill is %s", status), ErrTypeBillClosed)
 }

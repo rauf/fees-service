@@ -20,8 +20,12 @@ type billState struct {
 	periodEnd   time.Time
 	bill        domain.Bill
 	// index maps a line item ID to its position in bill.Items.
-	index        map[string]int
-	addedThisRun int
+	index   map[string]int
+	closeCh workflow.ReceiveChannel
+	// closeRequested is set by the close update or signal. It always wins over continue-as-new:
+	// a close update waits for the total, which a run handing over would never produce.
+	closeRequested bool
+	closeReason    domain.CloseReason
 }
 
 var (
@@ -57,16 +61,16 @@ func BillWorkflow(ctx workflow.Context, in BillInput) (domain.Bill, error) {
 		return domain.Bill{}, err
 	}
 
-	reason, err := s.awaitClose(ctx)
+	closing, err := s.awaitClose(ctx)
 	if err != nil {
 		return domain.Bill{}, err
 	}
 
-	if reason == "" {
+	if !closing {
 		return s.continueAsNew(ctx)
 	}
 
-	if err := s.close(ctx, reason); err != nil {
+	if err := s.close(ctx); err != nil {
 		return domain.Bill{}, err
 	}
 
@@ -92,6 +96,7 @@ func newBillState(ctx workflow.Context, in BillInput) (*billState, error) {
 		periodStart: start,
 		periodEnd:   periodEnd(start),
 		index:       map[string]int{},
+		closeCh:     workflow.GetSignalChannel(ctx, SignalClose),
 	}
 
 	if in.Resume != nil {
@@ -134,53 +139,71 @@ func (s *billState) registerHandlers(ctx workflow.Context) error {
 		return fmt.Errorf("register %s update: %w", UpdateAddLineItem, err)
 	}
 
-	return nil
-}
+	if err := workflow.SetUpdateHandler(ctx, UpdateClose, s.closeAndAwaitTotal); err != nil {
+		return fmt.Errorf("register %s update: %w", UpdateClose, err)
+	}
 
-// awaitClose blocks while the bill is open. It returns why the bill closed, or an empty reason
-// when the run should continue as new instead.
-func (s *billState) awaitClose(ctx workflow.Context) (domain.CloseReason, error) {
-	closeRequested := false
-	closeCh := workflow.GetSignalChannel(ctx, SignalClose)
 	// Drained for the workflow's lifetime, so a repeated close is a no-op rather than a buffered signal.
 	workflow.Go(ctx, func(ctx workflow.Context) {
 		for {
-			closeCh.Receive(ctx, nil)
-			closeRequested = true
+			s.closeCh.Receive(ctx, nil)
+			s.closeRequested = true
 		}
 	})
 
-	wait := max(s.bill.CloseDeadline.Sub(workflow.Now(ctx)), 0)
-	inTime, err := workflow.AwaitWithTimeout(ctx, wait, func() bool {
-		return closeRequested || s.shouldContinueAsNew(ctx)
-	})
-	if err != nil {
-		return "", fmt.Errorf("await close: %w", err)
-	}
-
-	switch {
-	case closeRequested:
-		return domain.CloseReasonManual, nil
-	case !inTime:
-		return domain.CloseReasonGracePeriodExpired, nil
-	default:
-		return "", nil
-	}
+	return nil
 }
 
-func (s *billState) shouldContinueAsNew(ctx workflow.Context) bool {
-	if s.in.ContinueAsNewAfter > 0 && s.addedThisRun >= s.in.ContinueAsNewAfter {
-		return true
+// closeAndAwaitTotal requests the close and answers once the total is final, so the caller gets
+// what is being charged without polling. It does not wait for the charge itself.
+func (s *billState) closeAndAwaitTotal(ctx workflow.Context) (domain.Bill, error) {
+	s.closeRequested = true
+	if err := workflow.Await(ctx, func() bool { return s.bill.Total != nil }); err != nil {
+		return domain.Bill{}, fmt.Errorf("await total: %w", err)
 	}
 
-	return workflow.GetInfo(ctx).GetContinueAsNewSuggested()
+	return s.bill, nil
+}
+
+// awaitClose blocks while the bill is open. It reports false when the run should continue as new
+// instead of closing.
+func (s *billState) awaitClose(ctx workflow.Context) (bool, error) {
+	wait := max(s.bill.CloseDeadline.Sub(workflow.Now(ctx)), 0)
+	inTime, err := workflow.AwaitWithTimeout(ctx, wait, func() bool {
+		return s.closeRequested || workflow.GetInfo(ctx).GetContinueAsNewSuggested()
+	})
+	if err != nil {
+		return false, fmt.Errorf("await close: %w", err)
+	}
+
+	if !inTime && !s.closeRequested {
+		s.closeReason = domain.CloseReasonGracePeriodExpired
+
+		return true, nil
+	}
+
+	// Hand over only once no handler is mid-flight, and only if no close arrived meanwhile.
+	if !s.closeRequested {
+		err := workflow.Await(ctx, func() bool { return s.closeRequested || workflow.AllHandlersFinished(ctx) })
+		if err != nil {
+			return false, fmt.Errorf("await handlers: %w", err)
+		}
+
+		for s.closeCh.ReceiveAsync(nil) {
+			s.closeRequested = true
+		}
+	}
+
+	if s.closeRequested {
+		s.closeReason = domain.CloseReasonManual
+
+		return true, nil
+	}
+
+	return false, nil
 }
 
 func (s *billState) continueAsNew(ctx workflow.Context) (domain.Bill, error) {
-	if err := workflow.Await(ctx, func() bool { return workflow.AllHandlersFinished(ctx) }); err != nil {
-		return domain.Bill{}, fmt.Errorf("await handlers: %w", err)
-	}
-
 	next := s.in
 	bill := s.bill
 	next.Resume = &bill
@@ -189,13 +212,12 @@ func (s *billState) continueAsNew(ctx workflow.Context) (domain.Bill, error) {
 }
 
 // close stops accepting line items, then converts every line into the bill's currency.
-func (s *billState) close(ctx workflow.Context, reason domain.CloseReason) error {
+func (s *billState) close(ctx workflow.Context) error {
 	now := workflow.Now(ctx)
-	s.bill.Status = domain.StatusClosing
-	s.bill.CloseReason = reason
+	s.bill.CloseReason = s.closeReason
 	s.bill.ClosedAt = &now
-	if err := workflow.UpsertTypedSearchAttributes(ctx, SearchAttrStatus.ValueSet(string(domain.StatusClosing))); err != nil {
-		return fmt.Errorf("upsert status: %w", err)
+	if err := s.setStatus(ctx, domain.StatusClosing); err != nil {
+		return err
 	}
 
 	var rates []fx.Rate
@@ -213,32 +235,33 @@ func (s *billState) close(ctx workflow.Context, reason domain.CloseReason) error
 	}
 
 	s.bill.Total = &total
-	s.bill.Status = domain.StatusCharging
-	err = workflow.UpsertTypedSearchAttributes(ctx,
-		SearchAttrStatus.ValueSet(string(domain.StatusCharging)), SearchAttrTotal.ValueSet(total.AmountMinor))
-	if err != nil {
-		return fmt.Errorf("upsert status: %w", err)
-	}
 
-	return nil
+	return s.setStatus(ctx, domain.StatusCharging, SearchAttrTotal.ValueSet(total.AmountMinor))
 }
 
 // charge collects the total. A failed charge is a terminal bill state, not a workflow failure,
 // so the final bill stays readable as the workflow's result.
 func (s *billState) charge(ctx workflow.Context) error {
-	s.bill.Status = domain.StatusCharged
+	status := domain.StatusCharged
 	if len(s.bill.Items) > 0 {
 		var a *Activities
 		actx := workflow.WithActivityOptions(ctx, paymentActivityOptions)
 		req := payment.ChargeRequest{IdempotencyKey: s.bill.ID, CustomerID: s.bill.CustomerID, Amount: *s.bill.Total}
 		if err := workflow.ExecuteActivity(actx, a.Charge, req).Get(actx, nil); err != nil {
-			s.bill.Status = domain.StatusChargeFailed
+			status = domain.StatusChargeFailed
 			s.bill.FailureReason = failureReason(err)
 		}
 	}
 
-	if err := workflow.UpsertTypedSearchAttributes(ctx, SearchAttrStatus.ValueSet(string(s.bill.Status))); err != nil {
-		return fmt.Errorf("upsert status: %w", err)
+	return s.setStatus(ctx, status)
+}
+
+// setStatus moves the bill to status and keeps its search attributes in step.
+func (s *billState) setStatus(ctx workflow.Context, status domain.Status, extra ...temporal.SearchAttributeUpdate) error {
+	s.bill.Status = status
+	updates := append([]temporal.SearchAttributeUpdate{SearchAttrStatus.ValueSet(string(status))}, extra...)
+	if err := workflow.UpsertTypedSearchAttributes(ctx, updates...); err != nil {
+		return fmt.Errorf("upsert search attributes for %s: %w", status, err)
 	}
 
 	return nil

@@ -72,7 +72,7 @@ func (s *Service) CreateBill(ctx context.Context, req *api.CreateBillRequest) (*
 	resp := adapters.BillFromDomain(bill)
 	resp.HTTPStatus = status
 
-	return &resp, nil
+	return resp, nil
 }
 
 // AddLineItem adds a fee to an open bill and returns the bill. The item ID is an idempotency key:
@@ -104,44 +104,57 @@ func (s *Service) AddLineItem(ctx context.Context, id string, req *api.AddLineIt
 		return nil, toAPIError(err)
 	}
 
-	resp := adapters.BillFromDomain(bill)
-
-	return &resp, nil
+	return adapters.BillFromDomain(bill), nil
 }
 
-// CloseBill asks the bill to close. Converting and charging continue asynchronously, so it
-// answers 202 with the bill as it stands; poll GetBill for the final total.
+// CloseBill closes a bill and answers with the total being charged and every converted line,
+// once the rates are in; the charge itself continues asynchronously. If the total is not ready
+// within the close wait it answers 202 with the bill as it stands. With async=true it only signals the
+// close and answers 202 at once, for batch closers that do not wait on each bill. Closing a bill
+// that has already closed returns it.
 //
 //encore:api public method=POST path=/bills/:id/close
-func (s *Service) CloseBill(ctx context.Context, id string) (*api.Bill, error) {
-	// A finished bill can no longer be signalled; closing it again is still a no-op.
-	if err := s.client.SignalWorkflow(ctx, id, "", workflow.SignalClose, nil); err != nil && !isNotFound(err) {
+func (s *Service) CloseBill(ctx context.Context, id string, req *api.CloseBillRequest) (*api.Bill, error) {
+	if req.Async {
+		return s.signalClose(ctx, id)
+	}
+
+	handle, err := s.client.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
+		WorkflowID:   id,
+		UpdateName:   workflow.UpdateClose,
+		WaitForStage: client.WorkflowUpdateStageAccepted,
+	})
+	if isNotFound(err) {
+		return s.getBill(ctx, id, http.StatusOK)
+	}
+
+	if err != nil {
 		return nil, toAPIError(err)
 	}
 
-	bill, err := s.queryBill(ctx, id)
-	if err != nil {
-		return nil, err
+	waitCtx, cancel := context.WithTimeout(ctx, s.closeWait)
+	defer cancel()
+
+	var bill domain.Bill
+	if err := handle.Get(waitCtx, &bill); err != nil {
+		if waitCtx.Err() != nil && ctx.Err() == nil {
+			return s.getBill(ctx, id, http.StatusAccepted)
+		}
+
+		return nil, toAPIError(err)
 	}
 
 	resp := adapters.BillFromDomain(bill)
-	resp.HTTPStatus = http.StatusAccepted
+	resp.HTTPStatus = http.StatusOK
 
-	return &resp, nil
+	return resp, nil
 }
 
 // GetBill returns a bill with its line items, open or finished.
 //
 //encore:api public method=GET path=/bills/:id
 func (s *Service) GetBill(ctx context.Context, id string) (*api.Bill, error) {
-	bill, err := s.queryBill(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-
-	resp := adapters.BillFromDomain(bill)
-
-	return &resp, nil
+	return s.getBill(ctx, id, http.StatusOK)
 }
 
 // ListBills returns bill summaries, newest first. Listing is eventually consistent: a bill
@@ -189,29 +202,41 @@ func (s *Service) ListBills(ctx context.Context, req *api.ListBillsRequest) (*ap
 	return resp, nil
 }
 
-// retryOnFinishedBill answers an add to a bill whose workflow has completed: an identical retry
-// of an item already on it still succeeds, anything else is refused.
+// retryOnFinishedBill answers an add to a bill whose workflow has completed, the same way the
+// open workflow would have: an identical retry succeeds, anything else is refused.
 func (s *Service) retryOnFinishedBill(ctx context.Context, id string, in domain.LineItemInput) (*api.Bill, error) {
 	bill, err := s.queryBill(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, item := range bill.Items {
-		if item.ID != in.ID {
-			continue
-		}
-
-		if !workflow.SamePayload(item, in) {
-			return nil, apiError(errs.AlreadyExists, fmt.Sprintf("line item %q already exists with different details", in.ID))
-		}
-
-		resp := adapters.BillFromDomain(bill)
-
-		return &resp, nil
+	if err := workflow.CheckAddToFinished(bill, in); err != nil {
+		return nil, toAPIError(err)
 	}
 
-	return nil, apiError(errs.FailedPrecondition, fmt.Sprintf("bill is %s", bill.Status))
+	return adapters.BillFromDomain(bill), nil
+}
+
+// signalClose sends the fire-and-forget close. A finished bill can no longer be signalled;
+// closing it again is still a no-op.
+func (s *Service) signalClose(ctx context.Context, id string) (*api.Bill, error) {
+	if err := s.client.SignalWorkflow(ctx, id, "", workflow.SignalClose, nil); err != nil && !isNotFound(err) {
+		return nil, toAPIError(err)
+	}
+
+	return s.getBill(ctx, id, http.StatusAccepted)
+}
+
+func (s *Service) getBill(ctx context.Context, id string, status int) (*api.Bill, error) {
+	bill, err := s.queryBill(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := adapters.BillFromDomain(bill)
+	resp.HTTPStatus = status
+
+	return resp, nil
 }
 
 func (s *Service) queryBill(ctx context.Context, id string) (domain.Bill, error) {
@@ -242,7 +267,7 @@ func listQuery(req api.ListBillsRequest) (string, error) {
 	}
 
 	if req.Status != "" {
-		if !validStatus(domain.Status(req.Status)) {
+		if !domain.Status(req.Status).Valid() {
 			return "", fmt.Errorf("invalid status %q", req.Status)
 		}
 
@@ -259,22 +284,13 @@ func listQuery(req api.ListBillsRequest) (string, error) {
 
 	if req.Currency != "" {
 		if _, err := money.ParseCurrency(req.Currency); err != nil {
-			return "", err
+			return "", fmt.Errorf("currency filter: %w", err)
 		}
 
 		clauses = append(clauses, fmt.Sprintf("%s = '%s'", workflow.SearchAttrCurrency.GetName(), req.Currency))
 	}
 
 	return strings.Join(clauses, " AND "), nil
-}
-
-func validStatus(s domain.Status) bool {
-	switch s {
-	case domain.StatusOpen, domain.StatusClosing, domain.StatusCharging, domain.StatusCharged, domain.StatusChargeFailed:
-		return true
-	default:
-		return false
-	}
 }
 
 func pageSizeOf(n int) (int32, error) {

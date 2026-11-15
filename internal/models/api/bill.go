@@ -23,6 +23,12 @@ type AddLineItemRequest struct {
 	OccurredAt *time.Time `json:"occurredAt,omitempty"`
 }
 
+// CloseBillRequest chooses how a close answers.
+type CloseBillRequest struct {
+	// Async only signals the close and answers 202 at once, without waiting for the total.
+	Async bool `query:"async"`
+}
+
 // ListBillsRequest filters bills; every filter is optional.
 type ListBillsRequest struct {
 	CustomerID string `query:"customerId"`

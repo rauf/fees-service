@@ -57,19 +57,24 @@ internal/services/payment/         Payment Service interface + stub
 - **Base currency** is set at creation and is the currency the bill is charged in. Line items may be in any
   supported currency and are stored as given.
 - **Line item**: client-supplied `id` (idempotency key), `description`, `amount` (> 0), `currency`, optional
-  `occurredAt` (defaults to `workflow.Now`; must fall inside the period and not in the future). Same `id` + same
+  `occurredAt` (defaults to `workflow.Now`). Explicit or defaulted, it must fall inside the period and not be more
+  than `clockSkew` (5s) in the future. Same `id` + same
   payload → no-op returning the bill; same `id` + different payload → conflict.
 - **Conversion happens at close**, using the daily rate for each item's `occurredAt` date, fetched in one activity
   batch. Each line is converted and rounded on its own; the total is the sum of converted lines.
 - **Status**: `OPEN → CLOSING → CHARGING → CHARGED | CHARGE_FAILED`. Line items only while `OPEN`. The workflow
   completes successfully in both terminal states. A bill with no items skips the charge.
-- **Closing**: a `close` signal (early close allowed), or a safety timer at period end + grace (default 7 days,
-  workflow input). The close reason (`manual` / `grace_period_expired`) is recorded.
+- **Closing**: the `closeBill` Update (answers once the total is final), the `close` Signal (fire-and-forget, the
+  API's `?async=true`), or a safety timer at period end + grace (default 7 days, workflow input). Early close is
+  allowed; the close reason (`manual` / `grace_period_expired`) is recorded.
+- **A pending close always wins over continue-as-new.** The close update awaits a total that a run handing over
+  would never produce, so continuing as new would strand it.
 - **Continue-as-new** when `GetContinueAsNewSuggested()`; the timer deadline is carried as an absolute time.
 
 ## Temporal
 
-- **Messages**: add line item = **Update** (validator rejects synchronously). Close = **Signal**. Read = **Query**.
+- **Messages**: add line item = **Update** (validator rejects synchronously). Close = **Update** that answers with
+  the total, plus a **Signal** for fire-and-forget closers. Read = **Query**.
   List = visibility over search attributes `CustomerID`, `BillStatus`, `BillCurrency`, `BillPeriod`, `BillTotal`.
 - **Side effects live in activities** (FX lookup, charging) and are idempotent; the bill ID is the payment
   idempotency key. FX retries indefinitely with capped backoff; a declined payment is non-retryable.
