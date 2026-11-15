@@ -15,6 +15,7 @@ orchestration). Each bill is one Temporal workflow; Temporal is the store of sta
 | `make up`       | Local Temporal via docker compose on `:7233`, UI on `:8233`     |
 | `make run`      | `encore run` — API and embedded worker, hot reload              |
 | `make test`     | `encore test ./...`                                             |
+| `make smoke`    | End-to-end tests (`tests/`, `e2e` build tag) over HTTP against the running app |
 | `make lint`     | `golangci-lint run` — config and carve-outs in `.golangci.yml`  |
 
 `make lint` and `make test` pass before anything is "done". The app reads `TEMPORAL_ADDRESS` (default
@@ -117,6 +118,9 @@ Test where a bug is silent or expensive — money math, workflow state transitio
   `RegisterDelayedCallback` to send signals/updates mid-run.
 - API: `go.temporal.io/sdk/mocks` client mock. No mockery; the two provider interfaces get hand-written fakes.
 - testify: `require` stops, `assert` continues.
+- End to end: `tests/<service>/`, black-box over HTTP against `make up` + `make run` (`API_URL` overrides the
+  default `http://localhost:4000`). Build tag `e2e`, so `make test` stays offline; CI runs them in their own job. Use a
+  fresh customer ID per test so reruns against the same Temporal never collide.
 
 ## Engineering principles
 

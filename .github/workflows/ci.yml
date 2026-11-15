@@ -34,3 +34,30 @@ jobs:
           echo "$HOME/.encore/bin" >> "$GITHUB_PATH"
       - name: Test
         run: encore test ./...
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Install Encore
+        run: |
+          curl -L https://encore.dev/install.sh | bash
+          echo "$HOME/.encore/bin" >> "$GITHUB_PATH"
+      - name: Start Temporal
+        run: make up
+      - name: Start the app
+        run: |
+          encore run > encore.log 2>&1 &
+          for _ in $(seq 1 120); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:4000/bills)" = "200" ] && exit 0
+            sleep 2
+          done
+          echo "app did not become ready"; exit 1
+      - name: End-to-end tests
+        run: make smoke
+      - name: App log
+        if: failure()
+        run: cat encore.log

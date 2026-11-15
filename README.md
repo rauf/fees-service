@@ -20,7 +20,8 @@ Prerequisites: Go 1.27, Docker, and the Encore CLI (`brew install encoredev/tap/
 ```sh
 make up      # Temporal dev server on :7233, UI on http://localhost:8233
 make run     # API + worker on http://localhost:4000, Encore dashboard on http://localhost:9400
-make test
+make test    # unit tests
+make smoke   # end-to-end tests over HTTP against the running app — the walkthrough below, asserted
 make lint    # golangci-lint v2.15+
 ```
 
