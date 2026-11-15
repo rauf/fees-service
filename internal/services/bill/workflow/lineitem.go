@@ -72,7 +72,7 @@ func (s *billState) checkLineItem(now time.Time, in domain.LineItemInput) error 
 		at = *in.OccurredAt
 	}
 
-	if at.Before(s.periodStart) || !at.Before(s.periodEnd) {
+	if !s.bill.Period.Contains(at) {
 		if in.OccurredAt == nil {
 			return fmt.Errorf("now is outside period %s; pass occurredAt within it", s.bill.Period)
 		}

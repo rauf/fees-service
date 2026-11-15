@@ -26,7 +26,9 @@ import (
 
 func TestCreateBill(t *testing.T) {
 	period := time.Now().UTC().Format("2006-01")
-	id := workflow.BillID("cus_1", period)
+	parsed, err := domain.ParsePeriod(period)
+	require.NoError(t, err)
+	id := workflow.BillID("cus_1", parsed)
 	alreadyStarted := serviceerror.NewWorkflowExecutionAlreadyStarted("started", "", "")
 
 	tests := map[string]struct {

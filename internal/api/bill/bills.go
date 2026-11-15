@@ -31,20 +31,24 @@ const (
 //
 //encore:api public method=POST path=/bills
 func (s *Service) CreateBill(ctx context.Context, req *api.CreateBillRequest) (*api.Bill, error) {
-	in := adapters.BillInputFromRequest(*req)
+	in, err := adapters.BillInputFromRequest(*req)
+	if err != nil {
+		return nil, apiError(errs.InvalidArgument, err.Error())
+	}
+
 	if err := workflow.ValidateNew(in, time.Now()); err != nil {
 		return nil, apiError(errs.InvalidArgument, err.Error())
 	}
 
 	id := workflow.BillID(in.CustomerID, in.Period)
-	_, err := s.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+	_, err = s.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:                                       id,
 		TaskQueue:                                workflow.TaskQueue,
 		WorkflowIDReusePolicy:                    enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
 		WorkflowExecutionErrorWhenAlreadyStarted: true,
 		TypedSearchAttributes: temporal.NewSearchAttributes(
 			workflow.SearchAttrCustomerID.ValueSet(in.CustomerID),
-			workflow.SearchAttrPeriod.ValueSet(in.Period),
+			workflow.SearchAttrPeriod.ValueSet(in.Period.String()),
 			workflow.SearchAttrCurrency.ValueSet(string(in.Currency)),
 			workflow.SearchAttrStatus.ValueSet(string(domain.StatusOpen)),
 		),
@@ -275,8 +279,8 @@ func listQuery(req api.ListBillsRequest) (string, error) {
 	}
 
 	if req.Period != "" {
-		if !workflow.ValidPeriod(req.Period) {
-			return "", fmt.Errorf("invalid period %q, want YYYY-MM", req.Period)
+		if _, err := domain.ParsePeriod(req.Period); err != nil {
+			return "", fmt.Errorf("period filter: %w", err)
 		}
 
 		clauses = append(clauses, fmt.Sprintf("%s = '%s'", workflow.SearchAttrPeriod.GetName(), req.Period))

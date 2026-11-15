@@ -16,8 +16,13 @@ import (
 )
 
 // BillInputFromRequest builds the input that starts a bill's workflow.
-func BillInputFromRequest(req api.CreateBillRequest) workflow.BillInput {
-	return workflow.BillInput{CustomerID: req.CustomerID, Period: req.Period, Currency: money.Currency(req.Currency)}
+func BillInputFromRequest(req api.CreateBillRequest) (workflow.BillInput, error) {
+	period, err := domain.ParsePeriod(req.Period)
+	if err != nil {
+		return workflow.BillInput{}, fmt.Errorf("bill: %w", err)
+	}
+
+	return workflow.BillInput{CustomerID: req.CustomerID, Period: period, Currency: money.Currency(req.Currency)}, nil
 }
 
 // LineItemInputFromRequest parses the request's decimal amount in its currency.
@@ -56,7 +61,7 @@ func BillFromDomain(b domain.Bill) *api.Bill {
 	return &api.Bill{
 		ID:            b.ID,
 		CustomerID:    b.CustomerID,
-		Period:        b.Period,
+		Period:        b.Period.String(),
 		Currency:      string(b.Currency),
 		Status:        string(b.Status),
 		Items:         items,

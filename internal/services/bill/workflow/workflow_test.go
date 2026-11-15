@@ -34,7 +34,10 @@ type billTest struct {
 
 const testBillID = "bill:cus_1:2026-11"
 
-var testStart = time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
+var (
+	testStart = time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
+	nov2026   = mustPeriod("2026-11")
+)
 
 func TestBillWorkflowChargesConvertedTotal(t *testing.T) {
 	bt := newBillTest(t, &fakePayments{})
@@ -50,7 +53,7 @@ func TestBillWorkflowChargesConvertedTotal(t *testing.T) {
 	}, 3*time.Minute)
 	bt.closeAt(time.Hour)
 
-	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: "2026-11", Currency: money.GEL})
+	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: nov2026, Currency: money.GEL})
 
 	assert.Len(t, midBill.Items, 2, "update returns the bill after the add")
 	assert.Equal(t, domain.StatusCharged, bill.Status)
@@ -69,7 +72,7 @@ func TestBillWorkflowClosesAfterGracePeriod(t *testing.T) {
 	bt := newBillTest(t, &fakePayments{})
 	bt.add(t, time.Minute, domain.LineItemInput{ID: "li_1", Description: "Card issuance", Amount: gel(1000)}, nil)
 
-	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: "2026-11", Currency: money.GEL, GracePeriod: 24 * time.Hour})
+	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: nov2026, Currency: money.GEL, GracePeriod: 24 * time.Hour})
 
 	deadline := time.Date(2026, 12, 2, 0, 0, 0, 0, time.UTC)
 	assert.Equal(t, domain.StatusCharged, bill.Status)
@@ -82,7 +85,7 @@ func TestBillWorkflowEmptyBillSkipsCharge(t *testing.T) {
 	bt := newBillTest(t, &fakePayments{})
 	bt.closeAt(time.Minute)
 
-	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: "2026-11", Currency: money.USD})
+	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: nov2026, Currency: money.USD})
 
 	assert.Equal(t, domain.StatusCharged, bill.Status)
 	assert.Equal(t, usd(0), *bill.Total)
@@ -126,7 +129,7 @@ func TestBillWorkflowCharge(t *testing.T) {
 			bt.add(t, time.Minute, domain.LineItemInput{ID: "li_1", Description: "Card issuance", Amount: usd(100)}, nil)
 			bt.closeAt(time.Hour)
 
-			bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: "2026-11", Currency: money.USD})
+			bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: nov2026, Currency: money.USD})
 
 			assert.Equal(t, tc.wantStatus, bill.Status)
 			assert.Len(t, tc.payments.calls, tc.wantCalls)
@@ -141,7 +144,7 @@ func TestBillWorkflowContinuesAsNew(t *testing.T) {
 	bt.env.RegisterDelayedCallback(func() { bt.env.SetContinueAsNewSuggested(true) }, 2*time.Minute)
 	bt.add(t, 2*time.Minute, domain.LineItemInput{ID: "li_2", Description: "Wire fee", Amount: usd(200)}, nil)
 
-	bt.env.ExecuteWorkflow(BillWorkflow, BillInput{CustomerID: "cus_1", Period: "2026-11", Currency: money.USD})
+	bt.env.ExecuteWorkflow(BillWorkflow, BillInput{CustomerID: "cus_1", Period: nov2026, Currency: money.USD})
 
 	require.True(t, bt.env.IsWorkflowCompleted())
 	var canErr *workflow.ContinueAsNewError
@@ -156,7 +159,7 @@ func TestBillWorkflowCloseUpdateAnswersWithTotal(t *testing.T) {
 	var closed domain.Bill
 	bt.env.RegisterDelayedCallback(func() { bt.sendCloseUpdate(t, &closed) }, time.Hour)
 
-	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: "2026-11", Currency: money.GEL})
+	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: nov2026, Currency: money.GEL})
 
 	assert.Equal(t, domain.StatusCharging, closed.Status, "answers once the total is final, before the charge")
 	require.NotNil(t, closed.Total)
@@ -169,7 +172,7 @@ func TestBillWorkflowCloseUpdateAnswersWithTotal(t *testing.T) {
 func TestBillWorkflowResumesCarriedBill(t *testing.T) {
 	bt := newBillTest(t, &fakePayments{})
 	carried := domain.Bill{
-		ID: testBillID, CustomerID: "cus_1", Period: "2026-11", Currency: money.USD, Status: domain.StatusOpen,
+		ID: testBillID, CustomerID: "cus_1", Period: nov2026, Currency: money.USD, Status: domain.StatusOpen,
 		Items:         []domain.LineItem{{ID: "li_1", Description: "Card issuance", Amount: usd(100), OccurredAt: testStart}},
 		Subtotals:     []money.Money{usd(100)},
 		CloseDeadline: time.Date(2026, 12, 8, 0, 0, 0, 0, time.UTC),
@@ -178,7 +181,7 @@ func TestBillWorkflowResumesCarriedBill(t *testing.T) {
 	bt.add(t, 2*time.Minute, domain.LineItemInput{ID: "li_2", Description: "Wire fee", Amount: usd(200)}, nil)
 	bt.closeAt(time.Hour)
 
-	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: "2026-11", Currency: money.USD, Resume: &carried})
+	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: nov2026, Currency: money.USD, Resume: &carried})
 
 	assert.Len(t, bill.Items, 2, "a retried item from the previous run stays deduplicated")
 	assert.Equal(t, usd(300), *bill.Total)
@@ -276,6 +279,15 @@ func (p *fakePayments) Charge(_ context.Context, req payment.ChargeRequest) erro
 	}
 
 	return nil
+}
+
+func mustPeriod(s string) domain.Period {
+	p, err := domain.ParsePeriod(s)
+	if err != nil {
+		panic(err)
+	}
+
+	return p
 }
 
 func usd(minor int64) money.Money {

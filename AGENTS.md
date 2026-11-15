@@ -24,7 +24,7 @@ orchestration). Each bill is one Temporal workflow; Temporal is the store of sta
 
 ```
 internal/money/                    Money{AmountMinor int64, Currency}, Parse/String/Add, Convert
-internal/models/domain/            Bill, LineItem, Conversion, LineItemInput, Status, CloseReason
+internal/models/domain/            Bill, LineItem, Conversion, LineItemInput, Status, CloseReason, Period
 internal/models/api/               HTTP request/response types
 internal/adapters/                 domain ↔ api mapping — the only place it lives
 internal/api/bill/                 Encore service — HTTP only: validate, call Temporal, map errors to errs.Code
@@ -51,7 +51,8 @@ internal/services/payment/         Payment Service interface + stub
 ## Bill model
 
 - **One bill per customer per month.** Bill ID = workflow ID = `bill:{customerId}:{period}`; `customerId` matches
-  `^[A-Za-z0-9_-]{1,64}$`, `period` is `YYYY-MM`, a UTC calendar month. Only the current or a future month can be
+  `^[A-Za-z0-9_-]{1,64}$`, `period` is a `domain.Period` — a UTC calendar month, parsed once at the boundary
+  (`domain.ParsePeriod`) and serialised as `YYYY-MM`, so history from before the type still decodes. Only the current or a future month can be
   created. Running-workflow-ID uniqueness plus a reject-duplicate reuse policy is the uniqueness guarantee; don't add
   a second check.
 - **Base currency** is set at creation and is the currency the bill is charged in. Line items may be in any
