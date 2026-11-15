@@ -8,13 +8,14 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"github.com/rauf/fees-service/internal/models/domain"
 	"github.com/rauf/fees-service/internal/money"
 	"github.com/rauf/fees-service/internal/services/fx"
 )
 
 // rateRequests lists the distinct (currency, day) rates the bill's foreign-currency items need,
 // in a stable order so the activity input is identical on replay.
-func rateRequests(b Bill) []fx.RateRequest {
+func rateRequests(b domain.Bill) []fx.RateRequest {
 	seen := map[string]bool{}
 	var reqs []fx.RateRequest
 	for _, item := range b.Items {
@@ -41,7 +42,7 @@ func rateRequests(b Bill) []fx.RateRequest {
 
 // applyConversions converts every line into the bill's currency at its own day's rate and returns
 // the total. Lines are rounded individually, so the total is exactly the sum of the lines shown.
-func applyConversions(b *Bill, rates []fx.Rate) (money.Money, error) {
+func applyConversions(b *domain.Bill, rates []fx.Rate) (money.Money, error) {
 	byKey := make(map[string]decimal.Decimal, len(rates))
 	for _, r := range rates {
 		if r.To != b.Currency {
@@ -71,7 +72,7 @@ func applyConversions(b *Bill, rates []fx.Rate) (money.Money, error) {
 			return money.Money{}, fmt.Errorf("convert line item %q: %w", item.ID, err)
 		}
 
-		item.Conversion = &Conversion{Rate: rate, RateDate: day, Amount: converted}
+		item.Conversion = &domain.Conversion{Rate: rate, RateDate: day, Amount: converted}
 
 		if total, err = total.Add(converted); err != nil {
 			return money.Money{}, fmt.Errorf("total: %w", err)

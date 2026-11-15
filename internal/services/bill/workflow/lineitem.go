@@ -10,16 +10,17 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
+	"github.com/rauf/fees-service/internal/models/domain"
 	"github.com/rauf/fees-service/internal/money"
 )
 
-func (s *billState) validateLineItem(ctx workflow.Context, in LineItemInput) error {
+func (s *billState) validateLineItem(ctx workflow.Context, in domain.LineItemInput) error {
 	return s.checkAdd(workflow.Now(ctx), in)
 }
 
 // checkAdd decides whether an add-line-item update is accepted. A retry of an item already on
 // the bill is accepted even once the bill is closed, so a retry gets the answer the original got.
-func (s *billState) checkAdd(now time.Time, in LineItemInput) error {
+func (s *billState) checkAdd(now time.Time, in domain.LineItemInput) error {
 	if i, ok := s.index[in.ID]; ok {
 		if !samePayload(s.bill.Items[i], in) {
 			return temporal.NewApplicationError(
@@ -29,7 +30,7 @@ func (s *billState) checkAdd(now time.Time, in LineItemInput) error {
 		return nil
 	}
 
-	if s.bill.Status != StatusOpen {
+	if s.bill.Status != domain.StatusOpen {
 		return temporal.NewApplicationError(fmt.Sprintf("bill is %s", s.bill.Status), ErrTypeBillClosed)
 	}
 
@@ -40,7 +41,7 @@ func (s *billState) checkAdd(now time.Time, in LineItemInput) error {
 	return nil
 }
 
-func (s *billState) checkLineItem(now time.Time, in LineItemInput) error {
+func (s *billState) checkLineItem(now time.Time, in domain.LineItemInput) error {
 	switch {
 	case strings.TrimSpace(in.ID) == "":
 		return errors.New("id is required")
@@ -71,14 +72,14 @@ func (s *billState) checkLineItem(now time.Time, in LineItemInput) error {
 	return nil
 }
 
-func (s *billState) addLineItem(ctx workflow.Context, in LineItemInput) (Bill, error) {
+func (s *billState) addLineItem(ctx workflow.Context, in domain.LineItemInput) (domain.Bill, error) {
 	if _, ok := s.index[in.ID]; ok {
 		return s.bill, nil
 	}
 
 	subtotal, err := s.subtotal(in.Amount.Currency).Add(in.Amount)
 	if err != nil {
-		return Bill{}, fmt.Errorf("add line item %q: %w", in.ID, err)
+		return domain.Bill{}, fmt.Errorf("add line item %q: %w", in.ID, err)
 	}
 
 	now := workflow.Now(ctx)
@@ -89,7 +90,7 @@ func (s *billState) addLineItem(ctx workflow.Context, in LineItemInput) (Bill, e
 
 	s.setSubtotal(subtotal)
 	s.index[in.ID] = len(s.bill.Items)
-	s.bill.Items = append(s.bill.Items, LineItem{
+	s.bill.Items = append(s.bill.Items, domain.LineItem{
 		ID:          in.ID,
 		Description: in.Description,
 		Amount:      in.Amount,
@@ -126,7 +127,7 @@ func (s *billState) setSubtotal(m money.Money) {
 
 // samePayload ignores OccurredAt when the retry omits it: the original defaulted it to the time it
 // was added, which a retry cannot reproduce.
-func samePayload(item LineItem, in LineItemInput) bool {
+func samePayload(item domain.LineItem, in domain.LineItemInput) bool {
 	return item.Description == in.Description &&
 		item.Amount == in.Amount &&
 		(in.OccurredAt == nil || item.OccurredAt.Equal(*in.OccurredAt))

@@ -8,6 +8,7 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
+	"github.com/rauf/fees-service/internal/models/domain"
 	"github.com/rauf/fees-service/internal/money"
 	"github.com/rauf/fees-service/internal/services/fx"
 	"github.com/rauf/fees-service/internal/services/payment"
@@ -17,7 +18,7 @@ type billState struct {
 	in          BillInput
 	periodStart time.Time
 	periodEnd   time.Time
-	bill        Bill
+	bill        domain.Bill
 	// index maps a line item ID to its position in bill.Items.
 	index        map[string]int
 	addedThisRun int
@@ -46,19 +47,19 @@ var (
 )
 
 // BillWorkflow accrues a customer's fees for one month, then converts, totals and charges them.
-func BillWorkflow(ctx workflow.Context, in BillInput) (Bill, error) {
+func BillWorkflow(ctx workflow.Context, in BillInput) (domain.Bill, error) {
 	s, err := newBillState(ctx, in)
 	if err != nil {
-		return Bill{}, err
+		return domain.Bill{}, err
 	}
 
 	if err := s.registerHandlers(ctx); err != nil {
-		return Bill{}, err
+		return domain.Bill{}, err
 	}
 
 	reason, err := s.awaitClose(ctx)
 	if err != nil {
-		return Bill{}, err
+		return domain.Bill{}, err
 	}
 
 	if reason == "" {
@@ -66,15 +67,15 @@ func BillWorkflow(ctx workflow.Context, in BillInput) (Bill, error) {
 	}
 
 	if err := s.close(ctx, reason); err != nil {
-		return Bill{}, err
+		return domain.Bill{}, err
 	}
 
 	if err := s.charge(ctx); err != nil {
-		return Bill{}, err
+		return domain.Bill{}, err
 	}
 
 	if err := workflow.Await(ctx, func() bool { return workflow.AllHandlersFinished(ctx) }); err != nil {
-		return Bill{}, fmt.Errorf("await handlers: %w", err)
+		return domain.Bill{}, fmt.Errorf("await handlers: %w", err)
 	}
 
 	return s.bill, nil
@@ -107,13 +108,13 @@ func newBillState(ctx workflow.Context, in BillInput) (*billState, error) {
 		grace = DefaultGracePeriod
 	}
 
-	s.bill = Bill{
+	s.bill = domain.Bill{
 		ID:            workflow.GetInfo(ctx).WorkflowExecution.ID,
 		CustomerID:    in.CustomerID,
 		Period:        in.Period,
 		Currency:      in.Currency,
-		Status:        StatusOpen,
-		Items:         []LineItem{},
+		Status:        domain.StatusOpen,
+		Items:         []domain.LineItem{},
 		Subtotals:     []money.Money{},
 		CreatedAt:     workflow.Now(ctx),
 		CloseDeadline: s.periodEnd.Add(grace),
@@ -123,7 +124,7 @@ func newBillState(ctx workflow.Context, in BillInput) (*billState, error) {
 }
 
 func (s *billState) registerHandlers(ctx workflow.Context) error {
-	if err := workflow.SetQueryHandler(ctx, QueryGetBill, func() (Bill, error) { return s.bill, nil }); err != nil {
+	if err := workflow.SetQueryHandler(ctx, QueryGetBill, func() (domain.Bill, error) { return s.bill, nil }); err != nil {
 		return fmt.Errorf("register %s query: %w", QueryGetBill, err)
 	}
 
@@ -138,7 +139,7 @@ func (s *billState) registerHandlers(ctx workflow.Context) error {
 
 // awaitClose blocks while the bill is open. It returns why the bill closed, or an empty reason
 // when the run should continue as new instead.
-func (s *billState) awaitClose(ctx workflow.Context) (CloseReason, error) {
+func (s *billState) awaitClose(ctx workflow.Context) (domain.CloseReason, error) {
 	closeRequested := false
 	closeCh := workflow.GetSignalChannel(ctx, SignalClose)
 	// Drained for the workflow's lifetime, so a repeated close is a no-op rather than a buffered signal.
@@ -159,9 +160,9 @@ func (s *billState) awaitClose(ctx workflow.Context) (CloseReason, error) {
 
 	switch {
 	case closeRequested:
-		return CloseReasonManual, nil
+		return domain.CloseReasonManual, nil
 	case !inTime:
-		return CloseReasonGracePeriodExpired, nil
+		return domain.CloseReasonGracePeriodExpired, nil
 	default:
 		return "", nil
 	}
@@ -175,25 +176,25 @@ func (s *billState) shouldContinueAsNew(ctx workflow.Context) bool {
 	return workflow.GetInfo(ctx).GetContinueAsNewSuggested()
 }
 
-func (s *billState) continueAsNew(ctx workflow.Context) (Bill, error) {
+func (s *billState) continueAsNew(ctx workflow.Context) (domain.Bill, error) {
 	if err := workflow.Await(ctx, func() bool { return workflow.AllHandlersFinished(ctx) }); err != nil {
-		return Bill{}, fmt.Errorf("await handlers: %w", err)
+		return domain.Bill{}, fmt.Errorf("await handlers: %w", err)
 	}
 
 	next := s.in
 	bill := s.bill
 	next.Resume = &bill
 
-	return Bill{}, workflow.NewContinueAsNewError(ctx, BillWorkflow, next)
+	return domain.Bill{}, workflow.NewContinueAsNewError(ctx, BillWorkflow, next)
 }
 
 // close stops accepting line items, then converts every line into the bill's currency.
-func (s *billState) close(ctx workflow.Context, reason CloseReason) error {
+func (s *billState) close(ctx workflow.Context, reason domain.CloseReason) error {
 	now := workflow.Now(ctx)
-	s.bill.Status = StatusClosing
+	s.bill.Status = domain.StatusClosing
 	s.bill.CloseReason = reason
 	s.bill.ClosedAt = &now
-	if err := workflow.UpsertTypedSearchAttributes(ctx, SearchAttrStatus.ValueSet(string(StatusClosing))); err != nil {
+	if err := workflow.UpsertTypedSearchAttributes(ctx, SearchAttrStatus.ValueSet(string(domain.StatusClosing))); err != nil {
 		return fmt.Errorf("upsert status: %w", err)
 	}
 
@@ -212,9 +213,9 @@ func (s *billState) close(ctx workflow.Context, reason CloseReason) error {
 	}
 
 	s.bill.Total = &total
-	s.bill.Status = StatusCharging
+	s.bill.Status = domain.StatusCharging
 	err = workflow.UpsertTypedSearchAttributes(ctx,
-		SearchAttrStatus.ValueSet(string(StatusCharging)), SearchAttrTotal.ValueSet(total.AmountMinor))
+		SearchAttrStatus.ValueSet(string(domain.StatusCharging)), SearchAttrTotal.ValueSet(total.AmountMinor))
 	if err != nil {
 		return fmt.Errorf("upsert status: %w", err)
 	}
@@ -225,13 +226,13 @@ func (s *billState) close(ctx workflow.Context, reason CloseReason) error {
 // charge collects the total. A failed charge is a terminal bill state, not a workflow failure,
 // so the final bill stays readable as the workflow's result.
 func (s *billState) charge(ctx workflow.Context) error {
-	s.bill.Status = StatusCharged
+	s.bill.Status = domain.StatusCharged
 	if len(s.bill.Items) > 0 {
 		var a *Activities
 		actx := workflow.WithActivityOptions(ctx, paymentActivityOptions)
 		req := payment.ChargeRequest{IdempotencyKey: s.bill.ID, CustomerID: s.bill.CustomerID, Amount: *s.bill.Total}
 		if err := workflow.ExecuteActivity(actx, a.Charge, req).Get(actx, nil); err != nil {
-			s.bill.Status = StatusChargeFailed
+			s.bill.Status = domain.StatusChargeFailed
 			s.bill.FailureReason = failureReason(err)
 		}
 	}

@@ -23,12 +23,19 @@ orchestration). Each bill is one Temporal workflow; Temporal is the store of sta
 
 ```
 internal/money/                    Money{AmountMinor int64, Currency}, Parse/String/Add, Convert
+internal/models/domain/            Bill, LineItem, Conversion, LineItemInput, Status, CloseReason
+internal/models/api/               HTTP request/response types
+internal/adapters/                 domain ↔ api mapping — the only place it lives
 internal/services/bill/            Encore service — HTTP only: validate, call Temporal, map errors to errs.Code
-internal/services/bill/workflow/   Temporal workflow, activities, types — NO encore imports
+internal/services/bill/workflow/   Temporal workflow, activities, BillInput, message names — NO encore imports
 internal/services/fx/              Exchange-rate Service interface + fixed-table stub
 internal/services/payment/         Payment Service interface + stub
 ```
 
+- **Domain types are persisted in Temporal history.** Renaming or retyping a field in `models/domain` must stay
+  readable by bills already running.
+- Workflow plumbing (`BillInput`, message names, search-attribute keys) stays in `workflow/`; `fx`/`payment` request
+  types stay with their service interfaces.
 - **`workflow/` never imports Encore.** A package that declares an Encore service only tests under `encore test`;
   keeping Temporal code apart lets plain `go test` run it, and lets it move to its own worker binary unchanged. The
   worker runs inside the Encore process for now (started in `initService`).
