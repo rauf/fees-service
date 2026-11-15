@@ -108,18 +108,13 @@ func TestCheckAddToFinished(t *testing.T) {
 func newTestState(t *testing.T, status domain.Status, items ...domain.LineItem) *billState {
 	t.Helper()
 
-	start, err := periodStart("2026-11")
-	require.NoError(t, err)
-
 	if status == "" {
 		status = domain.StatusOpen
 	}
 
 	s := &billState{
-		periodStart: start,
-		periodEnd:   periodEnd(start),
-		index:       map[string]int{},
-		bill:        domain.Bill{Period: "2026-11", Currency: money.GEL, Status: status},
+		index: map[string]int{},
+		bill:  domain.Bill{Period: nov2026, Currency: money.GEL, Status: status},
 	}
 	for i, item := range items {
 		s.index[item.ID] = i

@@ -4,16 +4,16 @@ import (
 	"fmt"
 	"regexp"
 	"time"
-)
 
-const periodLayout = "2006-01"
+	"github.com/rauf/fees-service/internal/models/domain"
+)
 
 // customerIDPattern excludes ':' so a bill ID splits unambiguously.
 var customerIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // BillID is the workflow ID of a customer's bill for a period; one bill per customer per month.
-func BillID(customerID, period string) string {
-	return "bill:" + customerID + ":" + period
+func BillID(customerID string, period domain.Period) string {
+	return "bill:" + customerID + ":" + period.String()
 }
 
 // ValidateNew reports whether a bill can be opened at now: only for the current or a future month.
@@ -22,12 +22,11 @@ func ValidateNew(in BillInput, now time.Time) error {
 		return fmt.Errorf("%w: customerId must match %s", ErrInvalidBill, customerIDPattern)
 	}
 
-	start, err := periodStart(in.Period)
-	if err != nil {
-		return err
+	if in.Period.IsZero() {
+		return fmt.Errorf("%w: period is required", ErrInvalidBill)
 	}
 
-	if !periodEnd(start).After(now) {
+	if !in.Period.End().After(now) {
 		return fmt.Errorf("%w: period %s has ended", ErrInvalidBill, in.Period)
 	}
 
@@ -45,27 +44,6 @@ func ValidateNew(in BillInput, now time.Time) error {
 // ValidCustomerID reports whether id can name a customer in a bill ID.
 func ValidCustomerID(id string) bool {
 	return customerIDPattern.MatchString(id)
-}
-
-// ValidPeriod reports whether period is a YYYY-MM month.
-func ValidPeriod(period string) bool {
-	_, err := periodStart(period)
-
-	return err == nil
-}
-
-// periodStart parses a "YYYY-MM" period into the first instant of that UTC month.
-func periodStart(period string) (time.Time, error) {
-	start, err := time.Parse(periodLayout, period)
-	if err != nil || start.Format(periodLayout) != period {
-		return time.Time{}, fmt.Errorf("%w: period %q must be YYYY-MM", ErrInvalidBill, period)
-	}
-
-	return start, nil
-}
-
-func periodEnd(start time.Time) time.Time {
-	return start.AddDate(0, 1, 0)
 }
 
 func utcDate(t time.Time) time.Time {

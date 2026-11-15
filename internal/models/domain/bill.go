@@ -20,7 +20,7 @@ type CloseReason string
 type Bill struct {
 	ID            string         `json:"id"`
 	CustomerID    string         `json:"customerId"`
-	Period        string         `json:"period"`
+	Period        Period         `json:"period"`
 	Currency      money.Currency `json:"currency"`
 	Status        Status         `json:"status"`
 	Items         []LineItem     `json:"items"`

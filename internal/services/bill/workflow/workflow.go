@@ -15,10 +15,8 @@ import (
 )
 
 type billState struct {
-	in          BillInput
-	periodStart time.Time
-	periodEnd   time.Time
-	bill        domain.Bill
+	in   BillInput
+	bill domain.Bill
 	// index maps a line item ID to its position in bill.Items.
 	index   map[string]int
 	closeCh workflow.ReceiveChannel
@@ -86,17 +84,14 @@ func BillWorkflow(ctx workflow.Context, in BillInput) (domain.Bill, error) {
 }
 
 func newBillState(ctx workflow.Context, in BillInput) (*billState, error) {
-	start, err := periodStart(in.Period)
-	if err != nil {
-		return nil, temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeInvalidBill, err)
+	if in.Period.IsZero() {
+		return nil, temporal.NewNonRetryableApplicationError("period is required", ErrTypeInvalidBill, nil)
 	}
 
 	s := &billState{
-		in:          in,
-		periodStart: start,
-		periodEnd:   periodEnd(start),
-		index:       map[string]int{},
-		closeCh:     workflow.GetSignalChannel(ctx, SignalClose),
+		in:      in,
+		index:   map[string]int{},
+		closeCh: workflow.GetSignalChannel(ctx, SignalClose),
 	}
 
 	if in.Resume != nil {
@@ -122,7 +117,7 @@ func newBillState(ctx workflow.Context, in BillInput) (*billState, error) {
 		Items:         []domain.LineItem{},
 		Subtotals:     []money.Money{},
 		CreatedAt:     workflow.Now(ctx),
-		CloseDeadline: s.periodEnd.Add(grace),
+		CloseDeadline: in.Period.End().Add(grace),
 	}
 
 	return s, nil

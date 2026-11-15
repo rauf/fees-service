@@ -13,7 +13,7 @@ import (
 // BillInput starts a bill's workflow.
 type BillInput struct {
 	CustomerID string         `json:"customerId"`
-	Period     string         `json:"period"`
+	Period     domain.Period  `json:"period"`
 	Currency   money.Currency `json:"currency"`
 	// GracePeriod is how long after the period ends the bill closes itself if no close signal
 	// arrives. Zero means DefaultGracePeriod.

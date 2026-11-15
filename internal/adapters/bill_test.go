@@ -42,6 +42,15 @@ func TestLineItemInputFromRequest(t *testing.T) {
 	}
 }
 
+func TestBillInputFromRequest(t *testing.T) {
+	got, err := BillInputFromRequest(api.CreateBillRequest{CustomerID: "cus_1", Period: "2026-11", Currency: "GEL"})
+	require.NoError(t, err)
+	assert.Equal(t, "2026-11", got.Period.String())
+
+	_, err = BillInputFromRequest(api.CreateBillRequest{CustomerID: "cus_1", Period: "2026-1", Currency: "GEL"})
+	require.ErrorIs(t, err, domain.ErrInvalidPeriod)
+}
+
 func TestBillFromDomain(t *testing.T) {
 	day := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
 	total := money.Money{AmountMinor: 1350, Currency: money.GEL}
