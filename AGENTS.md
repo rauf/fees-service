@@ -83,7 +83,10 @@ internal/services/payment/         Payment Service interface + stub
 - Workflow code is replayed from history, so it must be deterministic: `workflow.Now` / `workflow.NewTimer` /
   `workflow.Go` / `workflow.Selector` — never `time.Now`, `time.Sleep`, `go`, native channels or `select`. No I/O,
   randomness, or map iteration that affects commands.
-- Changing logic that running bills already executed → `workflow.GetVersion`.
+- Changing logic that running bills already executed → `workflow.GetVersion`. `TestReplay` replays the histories in
+  `workflow/testdata/` and fails on any non-determinism. Record them from the code running bills depend on
+  (`make up && make run`, then `make replay/record`, which scrubs the hostname) and add a history for every new
+  path a bill can take; never re-record to make a failing replay pass.
 - Query handlers never mutate or block. Wait for `workflow.AllHandlersFinished` before returning or continuing as new.
 - Log with `workflow.GetLogger` / `activity.GetLogger` in Temporal code (replay-aware), `encore.dev/rlog` elsewhere.
 

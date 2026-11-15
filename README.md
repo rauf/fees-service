@@ -176,8 +176,9 @@ reach the visibility query.
   ledger or database by a final activity; Temporal then holds only bills in flight.
 - **A separate worker deployment**, so API and worker scale and deploy independently. The workflow package has no
   Encore dependency, so it moves to its own binary unchanged.
-- **Versioning.** A bill runs for a month, so changing its logic needs `workflow.GetVersion` or worker versioning, and
-  replay tests against recorded histories.
+- **Versioning.** A bill runs for a month, so changing its logic needs `workflow.GetVersion` or worker versioning.
+  `TestReplay` already replays recorded histories (`make replay/record`); production would record them from real
+  traffic.
 - **Real providers** behind `fx.Service` (the National Bank of Georgia publishes an official daily GEL rate) and
   `payment.Service`, plus dunning for `CHARGE_FAILED` bills.
 - **Service authentication** (mTLS or Encore auth handlers) and per-customer billing currency from the customer

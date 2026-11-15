@@ -25,6 +25,10 @@ test: ## Run all tests
 smoke: ## End-to-end tests against the running app (make up && make run first; API_URL overrides)
 	@go test -tags e2e -count=1 ./tests/...
 
+.PHONY: replay/record
+replay/record: ## Record workflow histories for the replay test (make up && make run first)
+	@./scripts/record-replay-histories.sh
+
 .PHONY: lint
 lint: ## Lint (read-only, as in CI)
 	@golangci-lint run
