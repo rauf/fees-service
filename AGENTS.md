@@ -27,7 +27,7 @@ internal/money/                    Money{AmountMinor int64, Currency}, Parse/Str
 internal/models/domain/            Bill, LineItem, Conversion, LineItemInput, Status, CloseReason
 internal/models/api/               HTTP request/response types
 internal/adapters/                 domain ↔ api mapping — the only place it lives
-internal/services/bill/            Encore service — HTTP only: validate, call Temporal, map errors to errs.Code
+internal/api/bill/                 Encore service — HTTP only: validate, call Temporal, map errors to errs.Code
 internal/services/bill/workflow/   Temporal workflow, activities, BillInput, message names — NO encore imports
 internal/services/fx/              Exchange-rate Service interface + fixed-table stub
 internal/services/payment/         Payment Service interface + stub
@@ -44,6 +44,8 @@ internal/services/payment/         Payment Service interface + stub
   `payment.Service`. The I/O boundary is those two packages, not a separate activities package.
 - `fx/` and `payment/` follow the service layout: `service.go` holds the `Service` interface, the types its
   signatures name, the struct, `NewService` and the `var _ Service = (*service)(nil)` assertion — nothing else.
+- **Transport lives in `internal/api/`, logic in `internal/services/`.** The Encore service package is the HTTP
+  layer; it also starts the in-process worker in `initService` (a split-out worker would get its own `cmd/worker`).
 - No HTTP router, `cmd/` or DI framework: Encore owns `main`, routing and wiring.
 
 ## Bill model
@@ -91,7 +93,7 @@ internal/services/payment/         Payment Service interface + stub
 ## Errors
 
 - Wrap with context: `fmt.Errorf("add line item: %w", err)`. Sentinels live in each package's `errors.go`.
-- `workflow` reports rejections as `temporal.ApplicationError` types (`errors.go`); `bill/errors.go` maps them to
+- `workflow` reports rejections as `temporal.ApplicationError` types (`errors.go`); `api/bill/errors.go` maps them to
   `errs.Code`: invalid input → InvalidArgument (400), bill no longer open → FailedPrecondition (400), conflicting
   retry or duplicate bill → AlreadyExists (409), unknown bill → NotFound, Temporal down → Unavailable.
 - Public error messages never carry the cause (Encore appends it to the message). Anything unmapped is logged with

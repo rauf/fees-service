@@ -172,6 +172,6 @@ linters:
       - common-false-positives
     rules:
       # initService is called from Encore's generated main, which the linter never sees.
-      - path: internal/services/bill/(service|config)\.go
+      - path: internal/api/bill/(service|config)\.go
         linters:
           - unused
