@@ -17,3 +17,5 @@ mise.local.toml
 .idea/
 .vscode/
 .DS_Store
+/.encore
+/encore.gen

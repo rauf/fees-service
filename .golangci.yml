@@ -170,3 +170,8 @@ linters:
     presets:
       - std-error-handling
       - common-false-positives
+    rules:
+      # initService is called from Encore's generated main, which the linter never sees.
+      - path: internal/services/bill/(service|config)\.go
+        linters:
+          - unused

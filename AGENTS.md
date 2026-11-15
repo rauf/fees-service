@@ -17,7 +17,8 @@ orchestration). Each bill is one Temporal workflow; Temporal is the store of sta
 | `make test`     | `encore test ./...`                                             |
 | `make lint`     | `golangci-lint run` — config and carve-outs in `.golangci.yml`  |
 
-`make lint` and `make test` pass before anything is "done".
+`make lint` and `make test` pass before anything is "done". The app reads `TEMPORAL_ADDRESS` (default
+`localhost:7233`). `make up` also sets the namespace's retention to 365 days, so a completed bill stays queryable.
 
 ## Layout
 
@@ -90,8 +91,13 @@ internal/services/payment/         Payment Service interface + stub
 ## Errors
 
 - Wrap with context: `fmt.Errorf("add line item: %w", err)`. Sentinels live in each package's `errors.go`.
-- `workflow` reports rejections as typed errors; `bill` maps them to `errs.Code`: unknown bill → NotFound, closed
-  bill or conflicting retry → FailedPrecondition / AlreadyExists, bad input → InvalidArgument.
+- `workflow` reports rejections as `temporal.ApplicationError` types (`errors.go`); `bill/errors.go` maps them to
+  `errs.Code`: invalid input → InvalidArgument (400), bill no longer open → FailedPrecondition (400), conflicting
+  retry or duplicate bill → AlreadyExists (409), unknown bill → NotFound, Temporal down → Unavailable.
+- Public error messages never carry the cause (Encore appends it to the message). Anything unmapped is logged with
+  `rlog` and returned as Internal.
+- An add or close on a bill whose workflow has completed gets NotFound from Temporal; the API then queries the bill
+  so an identical retry still succeeds and only a truly unknown bill is a 404.
 - Fix the cause, not the symptom. An error swallowed to go green is still a bug.
 
 ## Testing

@@ -22,7 +22,7 @@ func (s *billState) validateLineItem(ctx workflow.Context, in domain.LineItemInp
 // the bill is accepted even once the bill is closed, so a retry gets the answer the original got.
 func (s *billState) checkAdd(now time.Time, in domain.LineItemInput) error {
 	if i, ok := s.index[in.ID]; ok {
-		if !samePayload(s.bill.Items[i], in) {
+		if !SamePayload(s.bill.Items[i], in) {
 			return temporal.NewApplicationError(
 				fmt.Sprintf("line item %q already exists with different details", in.ID), ErrTypeLineItemConflict)
 		}
@@ -125,9 +125,9 @@ func (s *billState) setSubtotal(m money.Money) {
 	slices.SortFunc(s.bill.Subtotals, func(a, b money.Money) int { return strings.Compare(string(a.Currency), string(b.Currency)) })
 }
 
-// samePayload ignores OccurredAt when the retry omits it: the original defaulted it to the time it
-// was added, which a retry cannot reproduce.
-func samePayload(item domain.LineItem, in domain.LineItemInput) bool {
+// SamePayload reports whether in is a retry of item. It ignores OccurredAt when the retry omits
+// it: the original defaulted it to the time it was added, which a retry cannot reproduce.
+func SamePayload(item domain.LineItem, in domain.LineItemInput) bool {
 	return item.Description == in.Description &&
 		item.Amount == in.Amount &&
 		(in.OccurredAt == nil || item.OccurredAt.Equal(*in.OccurredAt))
