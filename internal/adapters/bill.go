@@ -24,19 +24,19 @@ func BillInputFromRequest(req api.CreateBillRequest) workflow.BillInput {
 func LineItemInputFromRequest(req api.AddLineItemRequest) (domain.LineItemInput, error) {
 	currency, err := money.ParseCurrency(req.Currency)
 	if err != nil {
-		return domain.LineItemInput{}, err
+		return domain.LineItemInput{}, fmt.Errorf("line item: %w", err)
 	}
 
 	amount, err := money.Parse(req.Amount, currency)
 	if err != nil {
-		return domain.LineItemInput{}, err
+		return domain.LineItemInput{}, fmt.Errorf("line item: %w", err)
 	}
 
 	return domain.LineItemInput{ID: req.ID, Description: req.Description, Amount: amount, OccurredAt: req.OccurredAt}, nil
 }
 
 // BillFromDomain renders a bill with decimal-string amounts.
-func BillFromDomain(b domain.Bill) api.Bill {
+func BillFromDomain(b domain.Bill) *api.Bill {
 	items := make([]api.LineItem, 0, len(b.Items))
 	for _, item := range b.Items {
 		items = append(items, lineItemFromDomain(item))
@@ -53,7 +53,7 @@ func BillFromDomain(b domain.Bill) api.Bill {
 		total = &t
 	}
 
-	return api.Bill{
+	return &api.Bill{
 		ID:            b.ID,
 		CustomerID:    b.CustomerID,
 		Period:        b.Period,

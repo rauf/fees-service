@@ -1,6 +1,7 @@
 package bill
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"testing"
@@ -140,6 +141,69 @@ func TestAddLineItem(t *testing.T) {
 
 func TestCloseBill(t *testing.T) {
 	const id = "bill:cus_1:2026-11"
+	total := money.Money{AmountMinor: 100, Currency: money.USD}
+	charging := domain.Bill{ID: id, Status: domain.StatusCharging, Total: &total}
+	open := domain.Bill{ID: id, Status: domain.StatusOpen}
+
+	tests := map[string]struct {
+		update     func(c *mocks.Client)
+		queryErr   error
+		wantStatus int
+		wantTotal  bool
+		wantCode   errs.ErrCode
+	}{
+		"answers with the total": {
+			update:     expectCloseUpdate(nil, func(context.Context) error { return nil }),
+			wantStatus: http.StatusOK,
+			wantTotal:  true,
+		},
+		"total not ready in time": {
+			update: expectCloseUpdate(nil, func(ctx context.Context) error {
+				<-ctx.Done()
+
+				return ctx.Err()
+			}),
+			wantStatus: http.StatusAccepted,
+		},
+		"finished bill": {
+			update:     expectCloseUpdate(notFound(), nil),
+			wantStatus: http.StatusOK,
+		},
+		"no such bill": {
+			update:   expectCloseUpdate(notFound(), nil),
+			queryErr: notFound(),
+			wantCode: errs.NotFound,
+		},
+		"temporal down": {
+			update:   expectCloseUpdate(serviceerror.NewUnavailable("down"), nil),
+			wantCode: errs.Unavailable,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			c := mocks.NewClient(t)
+			tc.update(c)
+			expectQuery(t, c, id, open, tc.queryErr)
+
+			got, err := (&Service{client: c, closeWait: 10 * time.Millisecond}).CloseBill(t.Context(), id, &api.CloseBillRequest{})
+
+			assertResult(t, tc.wantCode, err)
+			if tc.wantCode != errs.OK {
+				return
+			}
+
+			assert.Equal(t, tc.wantStatus, got.HTTPStatus)
+			if tc.wantTotal {
+				assert.Equal(t, &api.Money{Amount: "1.00", Currency: "USD"}, got.Total)
+				assert.Equal(t, string(charging.Status), got.Status)
+			}
+		})
+	}
+}
+
+func TestCloseBillAsync(t *testing.T) {
+	const id = "bill:cus_1:2026-11"
 
 	tests := map[string]struct {
 		signalErr error
@@ -157,13 +221,44 @@ func TestCloseBill(t *testing.T) {
 			c.On("SignalWorkflow", mock.Anything, id, "", workflow.SignalClose, nil).Return(tc.signalErr)
 			expectQuery(t, c, id, domain.Bill{ID: id, Status: domain.StatusOpen}, tc.queryErr)
 
-			got, err := (&Service{client: c}).CloseBill(t.Context(), id)
+			got, err := (&Service{client: c}).CloseBill(t.Context(), id, &api.CloseBillRequest{Async: true})
 
 			assertResult(t, tc.wantCode, err)
 			if tc.wantCode == errs.OK {
 				assert.Equal(t, http.StatusAccepted, got.HTTPStatus)
 			}
 		})
+	}
+}
+
+// expectCloseUpdate stubs the close update: updateErr fails the call itself; otherwise get decides
+// how waiting for the result behaves, and a success answers with a charging bill.
+func expectCloseUpdate(updateErr error, get func(context.Context) error) func(c *mocks.Client) {
+	const id = "bill:cus_1:2026-11"
+
+	return func(c *mocks.Client) {
+		total := money.Money{AmountMinor: 100, Currency: money.USD}
+		handle := &mocks.WorkflowUpdateHandle{}
+		if updateErr == nil {
+			handle.On("Get", mock.Anything, mock.Anything).Return(func(ctx context.Context, valuePtr any) error {
+				if err := get(ctx); err != nil {
+					return err
+				}
+
+				bill, ok := valuePtr.(*domain.Bill)
+				if !ok {
+					return errors.New("unexpected value pointer")
+				}
+
+				*bill = domain.Bill{ID: id, Status: domain.StatusCharging, Total: &total}
+
+				return nil
+			})
+		}
+
+		c.On("UpdateWorkflow", mock.Anything, mock.MatchedBy(func(o client.UpdateWorkflowOptions) bool {
+			return o.WorkflowID == id && o.UpdateName == workflow.UpdateClose && o.WaitForStage == client.WorkflowUpdateStageAccepted
+		})).Return(handle, updateErr)
 	}
 }
 

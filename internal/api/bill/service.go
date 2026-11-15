@@ -5,6 +5,7 @@ package bill
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
@@ -18,8 +19,9 @@ import (
 //
 //encore:service
 type Service struct {
-	client client.Client
-	worker worker.Worker
+	client    client.Client
+	worker    worker.Worker
+	closeWait time.Duration
 }
 
 func initService() (*Service, error) {
@@ -37,7 +39,7 @@ func initService() (*Service, error) {
 		return nil, fmt.Errorf("start worker: %w", err)
 	}
 
-	return &Service{client: c, worker: w}, nil
+	return &Service{client: c, worker: w, closeWait: defaultCloseWait}, nil
 }
 
 // Shutdown stops the worker before closing the client it polls through.

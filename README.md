@@ -47,10 +47,10 @@ curl -X POST "$API/bills/$BILL/line-items" \
 curl -X POST "$API/bills/$BILL/line-items" \
   -d '{"id":"li_2","description":"Wire fee","amount":"6","currency":"USD"}'                # 409
 
-# Close. Conversion and charging run asynchronously.
-curl -X POST "$API/bills/$BILL/close"                                                       # 202
-curl "$API/bills/$BILL"
-# status CHARGED, total 23.50 GEL: 10.00 GEL + 5.00 USD × 2.70 = 13.50 GEL, each line showing its rate and date
+# Close. It answers once the total is final — status CHARGING, total 23.50 GEL:
+# 10.00 GEL + 5.00 USD × 2.70 = 13.50 GEL, each line showing its rate and date. The charge follows.
+curl -X POST "$API/bills/$BILL/close"                                                       # 200
+curl "$API/bills/$BILL"                                                                     # CHARGED
 
 # The bill no longer takes fees.
 curl -X POST "$API/bills/$BILL/line-items" \
@@ -70,7 +70,8 @@ All amounts are decimal strings (`"12.50"`), never JSON numbers.
 |---|---|---|---|
 | `POST /bills` | Open a bill: `customerId`, `period` (`YYYY-MM`, UTC), `currency` | `201`; an identical retry `200` | `400` invalid input or a past month; `409` the bill exists in another currency or has finished |
 | `POST /bills/:id/line-items` | Add a fee: `id`, `description`, `amount`, `currency`, optional `occurredAt` | `200` with the bill | `400` invalid, or bill not open; `409` `id` reused with different details; `404` |
-| `POST /bills/:id/close` | Ask the bill to close | `202` with the bill as it stands | `404` |
+| `POST /bills/:id/close` | Close the bill; answers once the total is final, before the charge | `200` with total and converted lines; `202` if the total is not ready within 10s | `404` |
+| `POST /bills/:id/close?async=true` | Signal the close and return at once, for batch closers | `202` with the bill as it stands | `404` |
 | `GET /bills/:id` | The bill, its lines, subtotals per currency and, once closed, conversions and total | `200` | `404` |
 | `GET /bills` | Summaries; optional `customerId`, `status`, `period`, `currency`, `pageSize` (≤ 100), `pageToken` | `200` | `400` invalid filter |
 
@@ -91,9 +92,10 @@ sequenceDiagram
     A->>W: Update addLineItem
     W-->>A: validator rejects, or the updated bill
     C->>A: POST /bills/:id/close
-    A->>W: Signal close (or the grace timer fires)
+    A->>W: Update closeBill (or Signal close with ?async=true, or the grace timer fires)
     W->>X: GetDailyRates (one batch)
     W->>W: convert each line, total
+    W-->>A: the bill with its total (Update)
     W->>X: Charge (idempotency key = bill ID)
     C->>A: GET /bills/:id
     A->>W: Query getBill
@@ -103,14 +105,18 @@ sequenceDiagram
 plus a reject-duplicate reuse policy — guarantees one bill per customer per month and makes create idempotent with
 no extra lookup.
 
-**Update to add, Signal to close, Query to read.** The spec asks for signals, but a signal cannot answer: the caller
-only learns it was delivered, so "reject a line item on a closed bill" would be silent or racy (query, then signal,
-with a close landing in between). An Update runs a validator inside the workflow and answers synchronously, so the
-rejection is a real `400`/`409` and a rejected update never enters history. Close needs no answer and must not be
-lost, so it is a signal; closing twice is harmless.
+**Updates where the caller needs an answer, a Signal where it does not, Queries to read.** A signal cannot answer:
+the caller only learns it was delivered. Adding a line item has to be refusable — "reject a line item on a closed
+bill" — so it is an Update whose validator rejects synchronously, with a real `400`/`409`, and a rejected update
+never enters history; query-then-signal would race a close landing in between. Closing has to report the total being
+charged, so the default close is an Update too: its handler marks the bill for closing and answers once the rates are
+in and the total is final — no polling, one round trip. The month-end close the spec describes as *signalling* stays a
+signal, `?async=true`: a batch job closing every customer's bill wants to fire and move on, not wait on each. Both
+set the same flag, and closing twice is harmless.
 
-**Closing.** The caller decides when a month's usage is complete, so the close signal is the normal path; a bill can
-also close early. A timer at period end plus a grace period (7 days by default) closes a bill the caller forgot, so
+**Closing.** The caller decides when a month's usage is complete, so an explicit close is the normal path; a bill can
+also close early. A pending close always wins over continue-as-new: a close update waits for a total that a run handing
+over would never produce. A timer at period end plus a grace period (7 days by default) closes a bill the caller forgot, so
 no workflow stays open forever. A timer at exactly period end would race with late-arriving usage.
 
 **Money is `int64` minor units with an ISO 4217 code** — exact, fast to add and compare, and ±9.2×10¹⁶ cents of
@@ -128,6 +134,10 @@ published daily rate does not change, so fetching late gives the same number whi
 off the path of capturing a fee. Each line is rounded on its own and the total is the sum of the lines, so the
 statement always adds up. The rates are recorded in history, so a replay converts identically.
 
+**Line item dates.** `occurredAt` defaults to when the item is added, and either way it must fall inside the bill's
+month and not in the future (allowing 5 seconds of clock skew). A late fee for last month is added with its own
+`occurredAt`; a bill for a future month takes items only once that month starts.
+
 **Idempotency.** Line item IDs are the caller's idempotency keys: a retry with the same payload returns the bill
 unchanged — even after the bill has closed, so a retry gets the answer the original got — and the same ID with
 different details is a conflict. The bill ID is the payment idempotency key, so a charge retried after a lost
@@ -135,7 +145,12 @@ acknowledgement does not charge twice.
 
 **Failure.** The charge retries five times with backoff; a decline is not retried. Either way the workflow completes
 successfully with the bill in `CHARGE_FAILED`, so the final bill stays readable as its result rather than being
-buried in a failed workflow. The exchange-rate lookup retries indefinitely, since a rate will exist.
+buried in a failed workflow. After timeouts `CHARGE_FAILED` is ambiguous — the provider may have taken the money on an
+attempt whose answer was lost — so it needs reconciliation with the provider; retrying is safe because the bill ID is
+the idempotency key. The exchange-rate lookup retries indefinitely, since a rate will exist.
+
+**Reads go through the worker.** A query replays the bill's history on a worker, so `GET` needs the worker up — here
+it runs in the API process, so they fail together.
 
 **Long bills** continue as new when Temporal suggests it, carrying the bill, so a customer with thousands of fees a
 month never hits the history limit.
@@ -166,7 +181,7 @@ reach the visibility query.
   `payment.Service`, plus dunning for `CHARGE_FAILED` bills.
 - **Service authentication** (mTLS or Encore auth handlers) and per-customer billing currency from the customer
   service rather than the request.
-- **Waiting on close.** `POST /close` could wait a few seconds for the total and fall back to `202`.
+- **Reconciling `CHARGE_FAILED`** against the provider, and a way to retry a charge.
 
 ## Layout
 

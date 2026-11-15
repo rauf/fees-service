@@ -11,12 +11,12 @@ import (
 func Convert(m Money, rate decimal.Decimal, to Currency) (Money, error) {
 	fromExp, err := m.Currency.Exponent()
 	if err != nil {
-		return Money{}, err
+		return Money{}, fmt.Errorf("convert from: %w", err)
 	}
 
 	toExp, err := to.Exponent()
 	if err != nil {
-		return Money{}, err
+		return Money{}, fmt.Errorf("convert to: %w", err)
 	}
 
 	if !rate.IsPositive() {

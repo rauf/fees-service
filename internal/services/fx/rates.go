@@ -3,6 +3,7 @@ package fx
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/shopspring/decimal"
 
@@ -19,7 +20,7 @@ func (*service) GetDailyRates(_ context.Context, reqs []RateRequest) ([]Rate, er
 	for _, req := range reqs {
 		rate, err := fixedRate(req.From, req.To)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("rate on %s: %w", req.Date.Format(time.DateOnly), err)
 		}
 
 		rates = append(rates, Rate{RateRequest: req, Rate: rate})

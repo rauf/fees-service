@@ -138,14 +138,32 @@ func TestBillWorkflowCharge(t *testing.T) {
 func TestBillWorkflowContinuesAsNew(t *testing.T) {
 	bt := newBillTest(t, &fakePayments{})
 	bt.add(t, time.Minute, domain.LineItemInput{ID: "li_1", Description: "Card issuance", Amount: usd(100)}, nil)
+	bt.env.RegisterDelayedCallback(func() { bt.env.SetContinueAsNewSuggested(true) }, 2*time.Minute)
 	bt.add(t, 2*time.Minute, domain.LineItemInput{ID: "li_2", Description: "Wire fee", Amount: usd(200)}, nil)
 
-	bt.env.ExecuteWorkflow(BillWorkflow, BillInput{CustomerID: "cus_1", Period: "2026-11", Currency: money.USD, ContinueAsNewAfter: 2})
+	bt.env.ExecuteWorkflow(BillWorkflow, BillInput{CustomerID: "cus_1", Period: "2026-11", Currency: money.USD})
 
 	require.True(t, bt.env.IsWorkflowCompleted())
 	var canErr *workflow.ContinueAsNewError
 	require.ErrorAs(t, bt.env.GetWorkflowError(), &canErr)
 	assert.Empty(t, bt.payments.calls)
+}
+
+func TestBillWorkflowCloseUpdateAnswersWithTotal(t *testing.T) {
+	bt := newBillTest(t, &fakePayments{})
+	bt.add(t, time.Minute, domain.LineItemInput{ID: "li_1", Description: "Card issuance", Amount: gel(1000)}, nil)
+	bt.add(t, time.Minute, domain.LineItemInput{ID: "li_2", Description: "Wire fee", Amount: usd(500)}, nil)
+	var closed domain.Bill
+	bt.env.RegisterDelayedCallback(func() { bt.sendCloseUpdate(t, &closed) }, time.Hour)
+
+	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: "2026-11", Currency: money.GEL})
+
+	assert.Equal(t, domain.StatusCharging, closed.Status, "answers once the total is final, before the charge")
+	require.NotNil(t, closed.Total)
+	assert.Equal(t, gel(2350), *closed.Total)
+	require.Len(t, closed.Items, 2)
+	assert.Equal(t, gel(1350), closed.Items[1].Conversion.Amount)
+	assert.Equal(t, domain.StatusCharged, bill.Status)
 }
 
 func TestBillWorkflowResumesCarriedBill(t *testing.T) {
@@ -202,6 +220,24 @@ func (bt *billTest) add(t *testing.T, delay time.Duration, in domain.LineItemInp
 			},
 		}, in)
 	}, delay)
+}
+
+// sendCloseUpdate sends the close update now and stores the bill it answers with; call it from a
+// delayed callback.
+func (bt *billTest) sendCloseUpdate(t *testing.T, result *domain.Bill) {
+	t.Helper()
+
+	bt.updates++
+	bt.env.UpdateWorkflow(UpdateClose, fmt.Sprintf("update-%d", bt.updates), &testsuite.TestUpdateCallback{
+		OnAccept: func() {},
+		OnReject: func(err error) { t.Errorf("close rejected: %v", err) },
+		OnComplete: func(v any, err error) {
+			require.NoError(t, err)
+			bill, ok := v.(domain.Bill)
+			require.True(t, ok)
+			*result = bill
+		},
+	})
 }
 
 func (bt *billTest) closeAt(delay time.Duration) {

@@ -19,6 +19,7 @@ func TestCheckAdd(t *testing.T) {
 	valid := domain.LineItemInput{ID: "li_2", Description: "Wire fee", Amount: gel(250)}
 
 	tests := map[string]struct {
+		now      time.Time
 		status   domain.Status
 		in       domain.LineItemInput
 		subtotal money.Money
@@ -34,6 +35,10 @@ func TestCheckAdd(t *testing.T) {
 		"before period":           {in: withOccurredAt(valid, time.Date(2026, 10, 31, 23, 59, 0, 0, time.UTC)), wantType: ErrTypeInvalidLineItem},
 		"at period end":           {in: withOccurredAt(valid, time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)), wantType: ErrTypeInvalidLineItem},
 		"in the future":           {in: withOccurredAt(valid, now.Add(time.Minute)), wantType: ErrTypeInvalidLineItem},
+		"within clock skew":       {in: withOccurredAt(valid, now.Add(clockSkew))},
+		"default after period":    {now: time.Date(2026, 12, 3, 0, 0, 0, 0, time.UTC), in: valid, wantType: ErrTypeInvalidLineItem},
+		"default before period":   {now: time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC), in: valid, wantType: ErrTypeInvalidLineItem},
+		"late item with date":     {now: time.Date(2026, 12, 3, 0, 0, 0, 0, time.UTC), in: withOccurredAt(valid, time.Date(2026, 11, 30, 0, 0, 0, 0, time.UTC))},
 		"subtotal overflow":       {in: valid, subtotal: gel(math.MaxInt64), wantType: ErrTypeInvalidLineItem},
 		"bill closing":            {status: domain.StatusClosing, in: valid, wantType: ErrTypeBillClosed},
 		"bill charged":            {status: domain.StatusCharged, in: valid, wantType: ErrTypeBillClosed},
@@ -52,7 +57,41 @@ func TestCheckAdd(t *testing.T) {
 				s.setSubtotal(tc.subtotal)
 			}
 
-			err := s.checkAdd(now, tc.in)
+			at := now
+			if !tc.now.IsZero() {
+				at = tc.now
+			}
+
+			err := s.checkAdd(at, tc.in)
+			if tc.wantType == "" {
+				require.NoError(t, err)
+
+				return
+			}
+
+			var appErr *temporal.ApplicationError
+			require.ErrorAs(t, err, &appErr)
+			assert.Equal(t, tc.wantType, appErr.Type())
+		})
+	}
+}
+
+func TestCheckAddToFinished(t *testing.T) {
+	item := domain.LineItem{ID: "li_1", Description: "Card issuance", Amount: usd(100), OccurredAt: testStart}
+	bill := domain.Bill{Status: domain.StatusCharged, Items: []domain.LineItem{item}}
+
+	tests := map[string]struct {
+		in       domain.LineItemInput
+		wantType string
+	}{
+		"identical retry":    {in: domain.LineItemInput{ID: "li_1", Description: "Card issuance", Amount: usd(100)}},
+		"reused for another": {in: domain.LineItemInput{ID: "li_1", Description: "Card issuance", Amount: usd(200)}, wantType: ErrTypeLineItemConflict},
+		"new item":           {in: domain.LineItemInput{ID: "li_2", Description: "Fee", Amount: usd(100)}, wantType: ErrTypeBillClosed},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := CheckAddToFinished(bill, tc.in)
 			if tc.wantType == "" {
 				require.NoError(t, err)
 
