@@ -28,9 +28,11 @@ const (
 	UpdateAddLineItem = "addLineItem"
 	// UpdateClose and SignalClose both close a bill: the update answers with the total, the signal
 	// is fire-and-forget for batch closers.
-	UpdateClose  = "closeBill"
-	SignalClose  = "close"
-	QueryGetBill = "getBill"
+	UpdateClose = "closeBill"
+	SignalClose = "close"
+	// UpdateRetryCharge runs the charge again on a CHARGE_FAILED bill.
+	UpdateRetryCharge = "retryCharge"
+	QueryGetBill      = "getBill"
 )
 
 const DefaultGracePeriod = 7 * 24 * time.Hour

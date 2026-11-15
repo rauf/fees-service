@@ -105,6 +105,38 @@ func TestCheckAddToFinished(t *testing.T) {
 	}
 }
 
+func TestValidateRetry(t *testing.T) {
+	tests := map[string]struct {
+		status       domain.Status
+		windowClosed bool
+		wantErr      bool
+	}{
+		"charge failed": {status: domain.StatusChargeFailed},
+		"window closed": {status: domain.StatusChargeFailed, windowClosed: true, wantErr: true},
+		"open":          {status: domain.StatusOpen, wantErr: true},
+		"charging":      {status: domain.StatusCharging, wantErr: true},
+		"charged":       {status: domain.StatusCharged, wantErr: true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := newTestState(t, tc.status)
+			s.retryWindowClosed = tc.windowClosed
+
+			err := s.validateRetry()
+			if !tc.wantErr {
+				require.NoError(t, err)
+
+				return
+			}
+
+			var appErr *temporal.ApplicationError
+			require.ErrorAs(t, err, &appErr)
+			assert.Equal(t, ErrTypeChargeNotFailed, appErr.Type())
+		})
+	}
+}
+
 func newTestState(t *testing.T, status domain.Status, items ...domain.LineItem) *billState {
 	t.Helper()
 

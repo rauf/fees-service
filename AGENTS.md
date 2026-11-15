@@ -64,8 +64,13 @@ internal/services/payment/         Payment Service interface + stub
   payload → no-op returning the bill; same `id` + different payload → conflict.
 - **Conversion happens at close**, using the daily rate for each item's `occurredAt` date, fetched in one activity
   batch. Each line is converted and rounded on its own; the total is the sum of converted lines.
-- **Status**: `OPEN → CLOSING → CHARGING → CHARGED | CHARGE_FAILED`. Line items only while `OPEN`. The workflow
-  completes successfully in both terminal states. A bill with no items skips the charge.
+- **Status**: `OPEN → CLOSING → CHARGING → CHARGED | CHARGE_FAILED`. Line items only while `OPEN`. A bill with no
+  items skips the charge. The status changes only once the charge activity answers — queries and waiting updates read
+  it meanwhile.
+- **A failed charge keeps the workflow open** for 30 days: automatic retries 1, 3 and 7 days after the first failure,
+  and the `retryCharge` Update (`POST /bills/:id/charge`, validator refuses unless `CHARGE_FAILED`) for one now. Each
+  retry goes `CHARGE_FAILED → CHARGING →` the outcome. After the window the workflow completes `CHARGE_FAILED`. The
+  loop sits behind `workflow.GetVersion("charge-retry")` so bills that failed before it replay unchanged.
 - **Closing**: the `closeBill` Update (answers once the total is final), the `close` Signal (fire-and-forget, the
   API's `?async=true`), or a safety timer at period end + grace (default 7 days, workflow input). Early close is
   allowed; the close reason (`manual` / `grace_period_expired`) is recorded.

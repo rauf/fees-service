@@ -264,6 +264,53 @@ func expectCloseUpdate(updateErr error, get func(context.Context) error) func(c 
 	}
 }
 
+func TestRetryCharge(t *testing.T) {
+	const id = "bill:cus_1:2026-11"
+
+	tests := map[string]struct {
+		updateErr  error
+		resultErr  error
+		finished   domain.Status
+		queryErr   error
+		wantCode   errs.ErrCode
+		wantSubstr string
+	}{
+		"started":           {},
+		"not charge failed": {resultErr: appErr(workflow.ErrTypeChargeNotFailed), wantCode: errs.FailedPrecondition},
+		"finished, charged": {updateErr: notFound(), finished: domain.StatusCharged, wantCode: errs.FailedPrecondition, wantSubstr: "CHARGED"},
+		"window closed":     {updateErr: notFound(), finished: domain.StatusChargeFailed, wantCode: errs.FailedPrecondition, wantSubstr: "window"},
+		"no such bill":      {updateErr: notFound(), queryErr: notFound(), wantCode: errs.NotFound},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			c := mocks.NewClient(t)
+			handle := mocks.NewWorkflowUpdateHandle(t)
+			if tc.updateErr == nil {
+				handle.On("Get", mock.Anything, mock.Anything).Return(tc.resultErr)
+			}
+
+			c.On("UpdateWorkflow", mock.Anything, mock.MatchedBy(func(o client.UpdateWorkflowOptions) bool {
+				return o.WorkflowID == id && o.UpdateName == workflow.UpdateRetryCharge
+			})).Return(handle, tc.updateErr)
+			if tc.updateErr != nil {
+				expectQuery(t, c, id, domain.Bill{ID: id, Status: tc.finished}, tc.queryErr)
+			}
+
+			got, err := (&Service{client: c}).RetryCharge(t.Context(), id)
+
+			assertResult(t, tc.wantCode, err)
+			if tc.wantCode == errs.OK {
+				assert.Equal(t, http.StatusAccepted, got.HTTPStatus)
+			}
+
+			if tc.wantSubstr != "" {
+				assert.Contains(t, errs.Convert(err).Error(), tc.wantSubstr)
+			}
+		})
+	}
+}
+
 func TestListQuery(t *testing.T) {
 	tests := map[string]struct {
 		req     api.ListBillsRequest

@@ -154,6 +154,46 @@ func (s *Service) CloseBill(ctx context.Context, id string, req *api.CloseBillRe
 	return resp, nil
 }
 
+// RetryCharge charges a CHARGE_FAILED bill again now, rather than waiting for its next automatic
+// retry. It answers 202 once the charge has started; poll GetBill for the outcome. The bill ID
+// stays the payment's idempotency key, so a retry after an ambiguous timeout never charges twice.
+//
+//encore:api public method=POST path=/bills/:id/charge
+func (s *Service) RetryCharge(ctx context.Context, id string) (*api.Bill, error) {
+	handle, err := s.client.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
+		WorkflowID:   id,
+		UpdateName:   workflow.UpdateRetryCharge,
+		WaitForStage: client.WorkflowUpdateStageCompleted,
+	})
+	if isNotFound(err) {
+		bill, qerr := s.queryBill(ctx, id)
+		if qerr != nil {
+			return nil, qerr
+		}
+
+		msg := fmt.Sprintf("bill is %s; only a CHARGE_FAILED bill can be charged again", bill.Status)
+		if bill.Status == domain.StatusChargeFailed {
+			msg = "the retry window for this bill has closed"
+		}
+
+		return nil, apiError(errs.FailedPrecondition, msg)
+	}
+
+	if err != nil {
+		return nil, toAPIError(err)
+	}
+
+	var bill domain.Bill
+	if err := handle.Get(ctx, &bill); err != nil {
+		return nil, toAPIError(err)
+	}
+
+	resp := adapters.BillFromDomain(bill)
+	resp.HTTPStatus = http.StatusAccepted
+
+	return resp, nil
+}
+
 // GetBill returns a bill with its line items, open or finished.
 //
 //encore:api public method=GET path=/bills/:id

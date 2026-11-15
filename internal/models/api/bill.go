@@ -60,6 +60,10 @@ type Bill struct {
 	Total         *Money     `json:"total,omitempty"`
 	CloseReason   string     `json:"closeReason,omitempty"`
 	FailureReason string     `json:"failureReason,omitempty"`
+	// ChargeAttempts counts charge runs: the first, plus automatic and requested retries.
+	ChargeAttempts int `json:"chargeAttempts,omitempty"`
+	// NextChargeAt is the next automatic retry of a CHARGE_FAILED bill.
+	NextChargeAt  *time.Time `json:"nextChargeAt,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	CloseDeadline time.Time  `json:"closeDeadline"`
 	ClosedAt      *time.Time `json:"closedAt,omitempty"`
