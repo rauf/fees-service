@@ -10,6 +10,7 @@ services:
       - --search-attribute=BillStatus=Keyword
       - --search-attribute=BillCurrency=Keyword
       - --search-attribute=BillPeriod=Keyword
+      - --search-attribute=BillTotal=Int
     ports:
       - "7233:7233"
       - "8233:8233"

@@ -1,0 +1,99 @@
+package workflow
+
+import (
+	"math"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
+
+	"github.com/rauf/fees-service/internal/money"
+)
+
+func TestCheckAdd(t *testing.T) {
+	now := testStart
+	existing := LineItem{ID: "li_1", Description: "Card issuance", Amount: usd(100), OccurredAt: now.Add(-time.Hour)}
+	valid := LineItemInput{ID: "li_2", Description: "Wire fee", Amount: gel(250)}
+
+	tests := map[string]struct {
+		status   Status
+		in       LineItemInput
+		subtotal money.Money
+		wantType string
+	}{
+		"valid":                   {in: valid},
+		"valid with occurredAt":   {in: withOccurredAt(valid, time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC))},
+		"empty id":                {in: LineItemInput{Description: "Fee", Amount: gel(1)}, wantType: ErrTypeInvalidLineItem},
+		"blank description":       {in: LineItemInput{ID: "li_2", Description: " ", Amount: gel(1)}, wantType: ErrTypeInvalidLineItem},
+		"zero amount":             {in: LineItemInput{ID: "li_2", Description: "Fee", Amount: gel(0)}, wantType: ErrTypeInvalidLineItem},
+		"negative amount":         {in: LineItemInput{ID: "li_2", Description: "Fee", Amount: gel(-1)}, wantType: ErrTypeInvalidLineItem},
+		"unsupported currency":    {in: LineItemInput{ID: "li_2", Description: "Fee", Amount: money.Money{AmountMinor: 1, Currency: "EUR"}}, wantType: ErrTypeInvalidLineItem},
+		"before period":           {in: withOccurredAt(valid, time.Date(2026, 10, 31, 23, 59, 0, 0, time.UTC)), wantType: ErrTypeInvalidLineItem},
+		"at period end":           {in: withOccurredAt(valid, time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)), wantType: ErrTypeInvalidLineItem},
+		"in the future":           {in: withOccurredAt(valid, now.Add(time.Minute)), wantType: ErrTypeInvalidLineItem},
+		"subtotal overflow":       {in: valid, subtotal: gel(math.MaxInt64), wantType: ErrTypeInvalidLineItem},
+		"bill closing":            {status: StatusClosing, in: valid, wantType: ErrTypeBillClosed},
+		"bill charged":            {status: StatusCharged, in: valid, wantType: ErrTypeBillClosed},
+		"retry of existing":       {in: LineItemInput{ID: "li_1", Description: "Card issuance", Amount: usd(100)}},
+		"retry with occurredAt":   {in: withOccurredAt(LineItemInput{ID: "li_1", Description: "Card issuance", Amount: usd(100)}, existing.OccurredAt)},
+		"retry after close":       {status: StatusCharged, in: LineItemInput{ID: "li_1", Description: "Card issuance", Amount: usd(100)}},
+		"reuse with other amount": {in: LineItemInput{ID: "li_1", Description: "Card issuance", Amount: usd(101)}, wantType: ErrTypeLineItemConflict},
+		"reuse with other desc":   {in: LineItemInput{ID: "li_1", Description: "Other", Amount: usd(100)}, wantType: ErrTypeLineItemConflict},
+		"reuse with other time":   {in: withOccurredAt(LineItemInput{ID: "li_1", Description: "Card issuance", Amount: usd(100)}, now), wantType: ErrTypeLineItemConflict},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := newTestState(t, tc.status, existing)
+			if tc.subtotal.Currency != "" {
+				s.setSubtotal(tc.subtotal)
+			}
+
+			err := s.checkAdd(now, tc.in)
+			if tc.wantType == "" {
+				require.NoError(t, err)
+
+				return
+			}
+
+			var appErr *temporal.ApplicationError
+			require.ErrorAs(t, err, &appErr)
+			assert.Equal(t, tc.wantType, appErr.Type())
+		})
+	}
+}
+
+func newTestState(t *testing.T, status Status, items ...LineItem) *billState {
+	t.Helper()
+
+	start, err := periodStart("2026-11")
+	require.NoError(t, err)
+
+	if status == "" {
+		status = StatusOpen
+	}
+
+	s := &billState{
+		periodStart: start,
+		periodEnd:   periodEnd(start),
+		index:       map[string]int{},
+		bill:        Bill{Period: "2026-11", Currency: money.GEL, Status: status},
+	}
+	for i, item := range items {
+		s.index[item.ID] = i
+		s.bill.Items = append(s.bill.Items, item)
+		subtotal, err := s.subtotal(item.Amount.Currency).Add(item.Amount)
+		require.NoError(t, err)
+		s.setSubtotal(subtotal)
+	}
+
+	return s
+}
+
+func withOccurredAt(in LineItemInput, at time.Time) LineItemInput {
+	in.OccurredAt = &at
+
+	return in
+}
