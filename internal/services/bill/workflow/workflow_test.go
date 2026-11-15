@@ -44,9 +44,10 @@ var (
 func TestBillWorkflowChargesConvertedTotal(t *testing.T) {
 	bt := newBillTest(t, &fakePayments{})
 
-	var midBill domain.Bill
+	var added, retried AddLineItemResult
 	bt.add(t, time.Minute, domain.LineItemInput{ID: "li_1", Description: "Card issuance", Amount: gel(1000)}, nil)
-	bt.add(t, 2*time.Minute, domain.LineItemInput{ID: "li_2", Description: "Wire fee", Amount: usd(500)}, &midBill)
+	bt.add(t, 2*time.Minute, domain.LineItemInput{ID: "li_2", Description: "Wire fee", Amount: usd(500)}, &added)
+	bt.add(t, 150*time.Second, domain.LineItemInput{ID: "li_2", Description: "Wire fee", Amount: usd(500)}, &retried)
 	bt.env.RegisterDelayedCallback(func() {
 		bill := bt.query(t)
 		assert.Equal(t, domain.StatusOpen, bill.Status)
@@ -57,7 +58,10 @@ func TestBillWorkflowChargesConvertedTotal(t *testing.T) {
 
 	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: nov2026, Currency: money.GEL})
 
-	assert.Len(t, midBill.Items, 2, "update returns the bill after the add")
+	wantItem := bill.Items[1]
+	wantItem.Conversion = nil
+	assert.Equal(t, AddLineItemResult{Item: wantItem, Created: true}, added, "update answers with the added item")
+	assert.Equal(t, AddLineItemResult{Item: wantItem}, retried, "a retry answers with the existing item")
 	assert.Equal(t, domain.StatusCharged, bill.Status)
 	assert.Equal(t, domain.CloseReasonManual, bill.CloseReason)
 	assert.Equal(t, testStart.Add(time.Hour), *bill.ClosedAt)
@@ -284,9 +288,9 @@ func newBillTest(t *testing.T, payments *fakePayments) *billTest {
 	return &billTest{env: env, payments: payments}
 }
 
-// add sends an add-line-item update after delay; it must be accepted. The resulting bill is
-// stored in result when non-nil.
-func (bt *billTest) add(t *testing.T, delay time.Duration, in domain.LineItemInput, result *domain.Bill) {
+// add sends an add-line-item update after delay; it must be accepted. Its result is stored in
+// result when non-nil.
+func (bt *billTest) add(t *testing.T, delay time.Duration, in domain.LineItemInput, result *AddLineItemResult) {
 	t.Helper()
 
 	bt.updates++
@@ -298,9 +302,9 @@ func (bt *billTest) add(t *testing.T, delay time.Duration, in domain.LineItemInp
 			OnComplete: func(v any, err error) {
 				require.NoError(t, err)
 				if result != nil {
-					bill, ok := v.(domain.Bill)
+					added, ok := v.(AddLineItemResult)
 					require.True(t, ok)
-					*result = bill
+					*result = added
 				}
 			},
 		}, in)

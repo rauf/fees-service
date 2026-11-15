@@ -3,9 +3,12 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
@@ -17,16 +20,29 @@ import (
 // clockSkew tolerates a caller whose clock runs slightly ahead of the worker's.
 const clockSkew = 5 * time.Second
 
+// The whole bill travels as one Temporal payload — continue-as-new input, query result, close
+// update result — and a payload over 2 MB fails the workflow task. These caps keep a full bill
+// under it (TestMaxBillFitsPayloadLimit); a bill needing more lines would need its items kept
+// outside workflow state.
+const (
+	maxLineItems         = 1000
+	maxDescriptionLength = 200
+)
+
+// lineItemIDPattern bounds the ID's size and keeps it free of characters JSON would escape.
+var lineItemIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+
 // CheckAddToFinished decides an add to a bill whose workflow has completed, where the update
-// validator can no longer answer. It gives the same answer the validator would have.
-func CheckAddToFinished(bill domain.Bill, in domain.LineItemInput) error {
+// validator can no longer answer. It gives the same answer the validator would have, and the
+// existing item on an identical retry.
+func CheckAddToFinished(bill domain.Bill, in domain.LineItemInput) (domain.LineItem, error) {
 	for _, item := range bill.Items {
 		if item.ID == in.ID {
-			return checkRetry(item, in)
+			return item, checkRetry(item, in)
 		}
 	}
 
-	return billClosedError(bill.Status)
+	return domain.LineItem{}, billClosedError(bill.Status)
 }
 
 func (s *billState) validateLineItem(ctx workflow.Context, in domain.LineItemInput) error {
@@ -53,12 +69,18 @@ func (s *billState) checkAdd(now time.Time, in domain.LineItemInput) error {
 
 func (s *billState) checkLineItem(now time.Time, in domain.LineItemInput) error {
 	switch {
-	case strings.TrimSpace(in.ID) == "":
-		return errors.New("id is required")
+	case !lineItemIDPattern.MatchString(in.ID):
+		return fmt.Errorf("id must match %s", lineItemIDPattern)
 	case strings.TrimSpace(in.Description) == "":
 		return errors.New("description is required")
+	case utf8.RuneCountInString(in.Description) > maxDescriptionLength:
+		return fmt.Errorf("description must be at most %d characters", maxDescriptionLength)
+	case strings.ContainsFunc(in.Description, unicode.IsControl):
+		return errors.New("description must not contain control characters")
 	case in.Amount.AmountMinor <= 0:
 		return errors.New("amount must be positive")
+	case len(s.bill.Items) >= maxLineItems:
+		return fmt.Errorf("bill already has the maximum of %d line items", maxLineItems)
 	}
 
 	if _, err := in.Amount.Currency.Exponent(); err != nil {
@@ -91,14 +113,14 @@ func (s *billState) checkLineItem(now time.Time, in domain.LineItemInput) error 
 	return nil
 }
 
-func (s *billState) addLineItem(ctx workflow.Context, in domain.LineItemInput) (domain.Bill, error) {
-	if _, ok := s.index[in.ID]; ok {
-		return s.bill, nil
+func (s *billState) addLineItem(ctx workflow.Context, in domain.LineItemInput) (AddLineItemResult, error) {
+	if i, ok := s.index[in.ID]; ok {
+		return AddLineItemResult{Item: s.bill.Items[i]}, nil
 	}
 
 	subtotal, err := s.subtotal(in.Amount.Currency).Add(in.Amount)
 	if err != nil {
-		return domain.Bill{}, fmt.Errorf("add line item %q: %w", in.ID, err)
+		return AddLineItemResult{}, fmt.Errorf("add line item %q: %w", in.ID, err)
 	}
 
 	now := workflow.Now(ctx)
@@ -107,17 +129,18 @@ func (s *billState) addLineItem(ctx workflow.Context, in domain.LineItemInput) (
 		occurredAt = in.OccurredAt.UTC()
 	}
 
-	s.setSubtotal(subtotal)
-	s.index[in.ID] = len(s.bill.Items)
-	s.bill.Items = append(s.bill.Items, domain.LineItem{
+	item := domain.LineItem{
 		ID:          in.ID,
 		Description: in.Description,
 		Amount:      in.Amount,
 		OccurredAt:  occurredAt,
 		AddedAt:     now,
-	})
+	}
+	s.setSubtotal(subtotal)
+	s.index[in.ID] = len(s.bill.Items)
+	s.bill.Items = append(s.bill.Items, item)
 
-	return s.bill, nil
+	return AddLineItemResult{Item: item, Created: true}, nil
 }
 
 func (s *billState) subtotal(c money.Currency) money.Money {

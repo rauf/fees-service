@@ -22,6 +22,15 @@ type BillInput struct {
 	Resume *domain.Bill `json:"resume,omitempty"`
 }
 
+// AddLineItemResult answers an add-line-item update. It carries the one item rather than the
+// bill: every update result is stored in history, so returning the bill would grow history
+// quadratically and eventually exceed Temporal's payload limit.
+type AddLineItemResult struct {
+	Item domain.LineItem `json:"item"`
+	// Created is false when the add was an identical retry of an item already on the bill.
+	Created bool `json:"created"`
+}
+
 // Names shared by the worker and the API's Temporal client.
 const (
 	TaskQueue         = "fees"

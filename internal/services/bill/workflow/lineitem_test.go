@@ -1,12 +1,16 @@
 package workflow
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/temporal"
 
 	"github.com/rauf/fees-service/internal/models/domain"
@@ -23,11 +27,20 @@ func TestCheckAdd(t *testing.T) {
 		status   domain.Status
 		in       domain.LineItemInput
 		subtotal money.Money
+		items    int
 		wantType string
 	}{
 		"valid":                   {in: valid},
 		"valid with occurredAt":   {in: withOccurredAt(valid, time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC))},
 		"empty id":                {in: domain.LineItemInput{Description: "Fee", Amount: gel(1)}, wantType: ErrTypeInvalidLineItem},
+		"id too long":             {in: domain.LineItemInput{ID: strings.Repeat("a", 129), Description: "Fee", Amount: gel(1)}, wantType: ErrTypeInvalidLineItem},
+		"id with space":           {in: domain.LineItemInput{ID: "li 2", Description: "Fee", Amount: gel(1)}, wantType: ErrTypeInvalidLineItem},
+		"id of max length":        {in: domain.LineItemInput{ID: strings.Repeat("a", 128), Description: "Fee", Amount: gel(1)}},
+		"description too long":    {in: domain.LineItemInput{ID: "li_2", Description: strings.Repeat("ფ", maxDescriptionLength+1), Amount: gel(1)}, wantType: ErrTypeInvalidLineItem},
+		"description of max len":  {in: domain.LineItemInput{ID: "li_2", Description: strings.Repeat("ფ", maxDescriptionLength), Amount: gel(1)}},
+		"control char in desc":    {in: domain.LineItemInput{ID: "li_2", Description: "Fee\x00", Amount: gel(1)}, wantType: ErrTypeInvalidLineItem},
+		"bill full":               {items: maxLineItems, in: valid, wantType: ErrTypeInvalidLineItem},
+		"retry on full bill":      {items: maxLineItems, in: domain.LineItemInput{ID: "li_1", Description: "Card issuance", Amount: usd(100)}},
 		"blank description":       {in: domain.LineItemInput{ID: "li_2", Description: " ", Amount: gel(1)}, wantType: ErrTypeInvalidLineItem},
 		"zero amount":             {in: domain.LineItemInput{ID: "li_2", Description: "Fee", Amount: gel(0)}, wantType: ErrTypeInvalidLineItem},
 		"negative amount":         {in: domain.LineItemInput{ID: "li_2", Description: "Fee", Amount: gel(-1)}, wantType: ErrTypeInvalidLineItem},
@@ -53,6 +66,10 @@ func TestCheckAdd(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			s := newTestState(t, tc.status, existing)
+			for i := len(s.bill.Items); i < tc.items; i++ {
+				s.bill.Items = append(s.bill.Items, domain.LineItem{ID: fmt.Sprintf("li_fill_%d", i)})
+			}
+
 			if tc.subtotal.Currency != "" {
 				s.setSubtotal(tc.subtotal)
 			}
@@ -91,9 +108,10 @@ func TestCheckAddToFinished(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			err := CheckAddToFinished(bill, tc.in)
+			got, err := CheckAddToFinished(bill, tc.in)
 			if tc.wantType == "" {
 				require.NoError(t, err)
+				assert.Equal(t, item, got)
 
 				return
 			}
@@ -135,6 +153,36 @@ func TestValidateRetry(t *testing.T) {
 			assert.Equal(t, ErrTypeChargeNotFailed, appErr.Type())
 		})
 	}
+}
+
+// TestMaxBillFitsPayloadLimit checks that a bill at every cap, converted, still fits in one
+// Temporal payload, as it must to continue as new or answer a query or the close update.
+func TestMaxBillFitsPayloadLimit(t *testing.T) {
+	const payloadLimit = 2 << 20
+
+	// '<' is escaped to \u003c by the JSON converter: the largest encoding a description can have.
+	description := strings.Repeat("<", maxDescriptionLength)
+	maxAmount := money.Money{AmountMinor: math.MaxInt64, Currency: money.USD}
+	rate := decimal.RequireFromString("0.3703703704")
+	at := time.Date(2026, 11, 30, 23, 59, 59, 999999999, time.FixedZone("", 4*3600))
+
+	bill := domain.Bill{
+		ID: BillID(strings.Repeat("c", 64), nov2026), CustomerID: strings.Repeat("c", 64), Period: nov2026,
+		Currency: money.GEL, Status: domain.StatusChargeFailed, Subtotals: []money.Money{maxAmount, maxAmount},
+		Total: &maxAmount, CloseReason: domain.CloseReasonGracePeriodExpired, FailureReason: strings.Repeat("x", 1024),
+		ChargeAttempts: 4, NextChargeAt: &at, CreatedAt: at, CloseDeadline: at, ClosedAt: &at,
+	}
+	for i := range maxLineItems {
+		id := fmt.Sprintf("%0128d", i)
+		bill.Items = append(bill.Items, domain.LineItem{
+			ID: id, Description: description, Amount: maxAmount, OccurredAt: at, AddedAt: at,
+			Conversion: &domain.Conversion{Rate: rate, RateDate: at, Amount: maxAmount},
+		})
+	}
+
+	payload, err := converter.GetDefaultDataConverter().ToPayload(BillInput{CustomerID: bill.CustomerID, Period: nov2026, Currency: money.GEL, Resume: &bill})
+	require.NoError(t, err)
+	assert.Less(t, payload.Size(), payloadLimit)
 }
 
 func newTestState(t *testing.T, status domain.Status, items ...domain.LineItem) *billState {

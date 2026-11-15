@@ -47,8 +47,16 @@ func TestBillLifecycle(t *testing.T) {
 
 	gelFee := api.AddLineItemRequest{ID: "li_1", Description: "Card issuance", Amount: "10.00", Currency: "GEL"}
 	usdFee := api.AddLineItemRequest{ID: "li_2", Description: "Wire fee", Amount: "5", Currency: "USD", OccurredAt: &monthStart}
-	c.expect(t, http.MethodPost, itemsPath(id), gelFee, http.StatusOK, nil)
-	c.expect(t, http.MethodPost, itemsPath(id), usdFee, http.StatusOK, &bill)
+	var added api.AddedLineItem
+	c.expect(t, http.MethodPost, itemsPath(id), gelFee, http.StatusCreated, nil)
+	c.expect(t, http.MethodPost, itemsPath(id), usdFee, http.StatusCreated, &added)
+	assert.Equal(t, id, added.BillID)
+	assert.Equal(t, api.LineItem{
+		ID: "li_2", Description: "Wire fee", Amount: api.Money{Amount: "5.00", Currency: "USD"},
+		OccurredAt: monthStart, AddedAt: added.Item.AddedAt,
+	}, added.Item)
+
+	c.expect(t, http.MethodGet, "/bills/"+id, nil, http.StatusOK, &bill)
 	assert.Equal(t, []api.Money{{Amount: "10.00", Currency: "GEL"}, {Amount: "5.00", Currency: "USD"}}, bill.Subtotals)
 
 	c.expect(t, http.MethodPost, itemsPath(id), usdFee, http.StatusOK, nil)
@@ -89,7 +97,7 @@ func TestAsyncClose(t *testing.T) {
 	id := billID(customer, currentPeriod())
 
 	c.expect(t, http.MethodPost, "/bills", createReq(customer, currentPeriod(), "USD"), http.StatusCreated, nil)
-	c.expect(t, http.MethodPost, itemsPath(id), api.AddLineItemRequest{ID: "li_1", Description: "Fee", Amount: "1", Currency: "USD"}, http.StatusOK, nil)
+	c.expect(t, http.MethodPost, itemsPath(id), api.AddLineItemRequest{ID: "li_1", Description: "Fee", Amount: "1", Currency: "USD"}, http.StatusCreated, nil)
 	c.expect(t, http.MethodPost, closePath(id)+"?async=true", nil, http.StatusAccepted, nil)
 
 	bill := c.eventuallyStatus(t, id, "CHARGED")
@@ -103,7 +111,7 @@ func TestDeclinedCharge(t *testing.T) {
 	id := billID(customer, currentPeriod())
 
 	c.expect(t, http.MethodPost, "/bills", createReq(customer, currentPeriod(), "USD"), http.StatusCreated, nil)
-	c.expect(t, http.MethodPost, itemsPath(id), api.AddLineItemRequest{ID: "li_1", Description: "Fee", Amount: "1", Currency: "USD"}, http.StatusOK, nil)
+	c.expect(t, http.MethodPost, itemsPath(id), api.AddLineItemRequest{ID: "li_1", Description: "Fee", Amount: "1", Currency: "USD"}, http.StatusCreated, nil)
 	c.expect(t, http.MethodPost, closePath(id), nil, http.StatusOK, nil)
 
 	bill := c.eventuallyStatus(t, id, "CHARGE_FAILED")
@@ -126,7 +134,7 @@ func TestRetryChargeRefusedWhenPaid(t *testing.T) {
 	id := billID(customer, currentPeriod())
 
 	c.expect(t, http.MethodPost, "/bills", createReq(customer, currentPeriod(), "USD"), http.StatusCreated, nil)
-	c.expect(t, http.MethodPost, itemsPath(id), api.AddLineItemRequest{ID: "li_1", Description: "Fee", Amount: "1", Currency: "USD"}, http.StatusOK, nil)
+	c.expect(t, http.MethodPost, itemsPath(id), api.AddLineItemRequest{ID: "li_1", Description: "Fee", Amount: "1", Currency: "USD"}, http.StatusCreated, nil)
 	c.expect(t, http.MethodPost, closePath(id), nil, http.StatusOK, nil)
 	c.eventuallyStatus(t, id, "CHARGED")
 
@@ -174,6 +182,10 @@ func TestRejectsInvalidRequests(t *testing.T) {
 		"occurred in future": {
 			method: http.MethodPost, path: itemsPath(id),
 			body: api.AddLineItemRequest{ID: "x", Description: "Fee", Amount: "1", Currency: "GEL", OccurredAt: &future}, want: http.StatusBadRequest,
+		},
+		"description too long": {
+			method: http.MethodPost, path: itemsPath(id),
+			body: api.AddLineItemRequest{ID: "x", Description: strings.Repeat("x", 201), Amount: "1", Currency: "GEL"}, want: http.StatusBadRequest,
 		},
 		"unknown bill":        {method: http.MethodGet, path: "/bills/" + billID(newCustomer("nobody"), period), want: http.StatusNotFound},
 		"add to unknown bill": {method: http.MethodPost, path: itemsPath(billID(newCustomer("nobody"), period)), body: api.AddLineItemRequest{ID: "x", Description: "Fee", Amount: "1", Currency: "GEL"}, want: http.StatusNotFound},
