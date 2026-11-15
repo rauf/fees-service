@@ -1,5 +1,10 @@
 version: "2"
 
+run:
+  # Lint the end-to-end tests too; they only build with this tag.
+  build-tags:
+    - e2e
+
 issues:
   max-same-issues: 50
 
