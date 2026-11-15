@@ -64,12 +64,19 @@ func (s *billState) retryCharges(ctx workflow.Context) error {
 		}
 
 		s.bill.NextChargeAt = nil
+		s.bill.FailureReason = ""
 		if err := s.setStatus(ctx, domain.StatusCharging); err != nil {
 			return err
 		}
 
 		if err := s.charge(ctx); err != nil {
 			return err
+		}
+
+		// A charge that ran past a scheduled time already was that retry; running the overdue one
+		// straight after would charge twice back to back.
+		for scheduled < len(chargeRetrySchedule) && !firstFailure.Add(chargeRetrySchedule[scheduled]).After(workflow.Now(ctx)) {
+			scheduled++
 		}
 	}
 
@@ -119,6 +126,11 @@ func (s *billState) requestRetry(ctx workflow.Context) (domain.Bill, error) {
 	err := workflow.Await(ctx, func() bool { return s.bill.Status != domain.StatusChargeFailed || s.retryWindowClosed })
 	if err != nil {
 		return domain.Bill{}, fmt.Errorf("await charge start: %w", err)
+	}
+
+	// Accepted as the window closed: no charge ran, so this is a refusal, not a started retry.
+	if s.bill.Status == domain.StatusChargeFailed {
+		return domain.Bill{}, temporal.NewApplicationError("the retry window for this bill has closed", ErrTypeChargeNotFailed)
 	}
 
 	return s.bill, nil

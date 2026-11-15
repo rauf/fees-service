@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 
@@ -177,9 +179,45 @@ func TestBillWorkflowManualRetry(t *testing.T) {
 	require.NotNil(t, failed.NextChargeAt)
 	assert.Equal(t, testStart.Add(25*time.Hour), *failed.NextChargeAt, "first automatic retry a day after the failure")
 	assert.Equal(t, domain.StatusCharging, retried.Status, "the update answers once the charge has started")
+	assert.Empty(t, retried.FailureReason, "a retry in progress does not show the previous failure")
+	assert.NotEmpty(t, failed.FailureReason)
 	assert.Equal(t, domain.StatusCharged, bill.Status)
 	assert.Len(t, bt.payments.calls, 2)
 	assert.Less(t, bt.env.Now().Sub(testStart), 3*time.Hour, "paid without waiting for the schedule")
+}
+
+// A requested retry that runs past a scheduled time stands in for it: the overdue scheduled retry
+// must not fire straight after it.
+func TestBillWorkflowRetrySkipsOverdueSchedule(t *testing.T) {
+	bt := newBillTest(t, &fakePayments{})
+	declined := temporal.NewNonRetryableApplicationError("payment declined", ErrTypePaymentDeclined, nil)
+	var calls []time.Duration
+	// AfterFn runs when the charge starts, before its delay; Run would only run after it.
+	bt.env.OnActivity((&Activities{}).Charge, mock.Anything, mock.Anything).
+		AfterFn(func() time.Duration {
+			calls = append(calls, bt.env.Now().Sub(testStart))
+			if len(calls) == 2 {
+				return 5 * time.Minute // the requested retry is slow and ends past the first scheduled time
+			}
+
+			return 0
+		}).
+		Return(declined)
+	bt.add(t, time.Minute, domain.LineItemInput{ID: "li_1", Description: "Card issuance", Amount: usd(100)}, nil)
+	bt.closeAt(time.Hour)
+	var retried domain.Bill
+	bt.env.RegisterDelayedCallback(func() { bt.sendRetryUpdate(t, &retried) }, time.Hour+24*time.Hour-2*time.Minute)
+
+	bill := bt.run(t, BillInput{CustomerID: "cus_1", Period: nov2026, Currency: money.USD})
+
+	failedAt := time.Hour
+	assert.Equal(t, []time.Duration{
+		failedAt,
+		failedAt + 24*time.Hour - 2*time.Minute,
+		failedAt + 3*24*time.Hour, // not failedAt + 24h: that slot was covered by the requested retry
+		failedAt + 7*24*time.Hour,
+	}, calls)
+	assert.Equal(t, domain.StatusChargeFailed, bill.Status)
 }
 
 func TestBillWorkflowContinuesAsNew(t *testing.T) {
