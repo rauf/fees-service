@@ -1,7 +1,6 @@
 package workflow
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
@@ -11,7 +10,6 @@ import (
 	"github.com/rauf/fees-service/internal/models/domain"
 	"github.com/rauf/fees-service/internal/money"
 	"github.com/rauf/fees-service/internal/services/fx"
-	"github.com/rauf/fees-service/internal/services/payment"
 )
 
 type billState struct {
@@ -24,6 +22,9 @@ type billState struct {
 	// a close update waits for the total, which a run handing over would never produce.
 	closeRequested bool
 	closeReason    domain.CloseReason
+	// retryRequested is set by the retry-charge update; retryWindowClosed once no retry can come.
+	retryRequested    bool
+	retryWindowClosed bool
 }
 
 var (
@@ -74,6 +75,13 @@ func BillWorkflow(ctx workflow.Context, in BillInput) (domain.Bill, error) {
 
 	if err := s.charge(ctx); err != nil {
 		return domain.Bill{}, err
+	}
+
+	if s.bill.Status == domain.StatusChargeFailed &&
+		workflow.GetVersion(ctx, chargeRetryChange, workflow.DefaultVersion, 1) == 1 {
+		if err := s.retryCharges(ctx); err != nil {
+			return domain.Bill{}, err
+		}
 	}
 
 	if err := workflow.Await(ctx, func() bool { return workflow.AllHandlersFinished(ctx) }); err != nil {
@@ -136,6 +144,12 @@ func (s *billState) registerHandlers(ctx workflow.Context) error {
 
 	if err := workflow.SetUpdateHandler(ctx, UpdateClose, s.closeAndAwaitTotal); err != nil {
 		return fmt.Errorf("register %s update: %w", UpdateClose, err)
+	}
+
+	err = workflow.SetUpdateHandlerWithOptions(ctx, UpdateRetryCharge, s.requestRetry,
+		workflow.UpdateHandlerOptions{Validator: s.validateRetry})
+	if err != nil {
+		return fmt.Errorf("register %s update: %w", UpdateRetryCharge, err)
 	}
 
 	// Drained for the workflow's lifetime, so a repeated close is a no-op rather than a buffered signal.
@@ -234,23 +248,6 @@ func (s *billState) close(ctx workflow.Context) error {
 	return s.setStatus(ctx, domain.StatusCharging, SearchAttrTotal.ValueSet(total.AmountMinor))
 }
 
-// charge collects the total. A failed charge is a terminal bill state, not a workflow failure,
-// so the final bill stays readable as the workflow's result.
-func (s *billState) charge(ctx workflow.Context) error {
-	status := domain.StatusCharged
-	if len(s.bill.Items) > 0 {
-		var a *Activities
-		actx := workflow.WithActivityOptions(ctx, paymentActivityOptions)
-		req := payment.ChargeRequest{IdempotencyKey: s.bill.ID, CustomerID: s.bill.CustomerID, Amount: *s.bill.Total}
-		if err := workflow.ExecuteActivity(actx, a.Charge, req).Get(actx, nil); err != nil {
-			status = domain.StatusChargeFailed
-			s.bill.FailureReason = failureReason(err)
-		}
-	}
-
-	return s.setStatus(ctx, status)
-}
-
 // setStatus moves the bill to status and keeps its search attributes in step.
 func (s *billState) setStatus(ctx workflow.Context, status domain.Status, extra ...temporal.SearchAttributeUpdate) error {
 	s.bill.Status = status
@@ -260,12 +257,4 @@ func (s *billState) setStatus(ctx workflow.Context, status domain.Status, extra 
 	}
 
 	return nil
-}
-
-func failureReason(err error) string {
-	if appErr, ok := errors.AsType[*temporal.ApplicationError](err); ok {
-		return appErr.Message()
-	}
-
-	return err.Error()
 }

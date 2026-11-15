@@ -108,6 +108,29 @@ func TestDeclinedCharge(t *testing.T) {
 
 	bill := c.eventuallyStatus(t, id, "CHARGE_FAILED")
 	assert.Contains(t, bill.FailureReason, "payment declined")
+	assert.Equal(t, 1, bill.ChargeAttempts)
+	require.NotNil(t, bill.NextChargeAt, "an automatic retry is scheduled")
+
+	// The stub declines this customer every time, so a requested retry fails again.
+	c.expect(t, http.MethodPost, chargePath(id), nil, http.StatusAccepted, nil)
+	require.EventuallyWithT(t, func(ct *assert.CollectT) {
+		c.expectT(t.Context(), ct, http.MethodGet, "/bills/"+id, nil, http.StatusOK, &bill)
+		assert.Equal(ct, 2, bill.ChargeAttempts)
+		assert.Equal(ct, "CHARGE_FAILED", bill.Status)
+	}, 30*time.Second, 200*time.Millisecond)
+}
+
+func TestRetryChargeRefusedWhenPaid(t *testing.T) {
+	c := newClient(t)
+	customer := newCustomer("cus")
+	id := billID(customer, currentPeriod())
+
+	c.expect(t, http.MethodPost, "/bills", createReq(customer, currentPeriod(), "USD"), http.StatusCreated, nil)
+	c.expect(t, http.MethodPost, itemsPath(id), api.AddLineItemRequest{ID: "li_1", Description: "Fee", Amount: "1", Currency: "USD"}, http.StatusOK, nil)
+	c.expect(t, http.MethodPost, closePath(id), nil, http.StatusOK, nil)
+	c.eventuallyStatus(t, id, "CHARGED")
+
+	c.expect(t, http.MethodPost, chargePath(id), nil, http.StatusBadRequest, nil)
 }
 
 func TestEmptyBillCloses(t *testing.T) {
@@ -261,6 +284,10 @@ func itemsPath(id string) string {
 
 func closePath(id string) string {
 	return "/bills/" + id + "/close"
+}
+
+func chargePath(id string) string {
+	return "/bills/" + id + "/charge"
 }
 
 func currentPeriod() string {

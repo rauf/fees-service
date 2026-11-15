@@ -73,11 +73,12 @@ All amounts are decimal strings (`"12.50"`), never JSON numbers.
 | `POST /bills/:id/line-items` | Add a fee: `id`, `description`, `amount`, `currency`, optional `occurredAt` | `200` with the bill | `400` invalid, or bill not open; `409` `id` reused with different details; `404` |
 | `POST /bills/:id/close` | Close the bill; answers once the total is final, before the charge | `200` with total and converted lines; `202` if the total is not ready within 10s | `404` |
 | `POST /bills/:id/close?async=true` | Signal the close and return at once, for batch closers | `202` with the bill as it stands | `404` |
+| `POST /bills/:id/charge` | Charge a `CHARGE_FAILED` bill again now, without waiting for its next automatic retry | `202` once the charge has started | `400` the bill is not `CHARGE_FAILED` or its retry window has closed; `404` |
 | `GET /bills/:id` | The bill, its lines, subtotals per currency and, once closed, conversions and total | `200` | `404` |
 | `GET /bills` | Summaries; optional `customerId`, `status`, `period`, `currency`, `pageSize` (≤ 100), `pageToken` | `200` | `400` invalid filter |
 
-A bill's ID is `bill:{customerId}:{period}`. Its status runs `OPEN → CLOSING → CHARGING → CHARGED | CHARGE_FAILED`;
-line items are accepted only while `OPEN`.
+A bill's ID is `bill:{customerId}:{period}`. Its status runs `OPEN → CLOSING → CHARGING → CHARGED | CHARGE_FAILED`,
+and a `CHARGE_FAILED` bill goes back to `CHARGING` on each retry; line items are accepted only while `OPEN`.
 
 ## Design
 
@@ -144,11 +145,15 @@ unchanged — even after the bill has closed, so a retry gets the answer the ori
 different details is a conflict. The bill ID is the payment idempotency key, so a charge retried after a lost
 acknowledgement does not charge twice.
 
-**Failure.** The charge retries five times with backoff; a decline is not retried. Either way the workflow completes
-successfully with the bill in `CHARGE_FAILED`, so the final bill stays readable as its result rather than being
-buried in a failed workflow. After timeouts `CHARGE_FAILED` is ambiguous — the provider may have taken the money on an
-attempt whose answer was lost — so it needs reconciliation with the provider; retrying is safe because the bill ID is
-the idempotency key. The exchange-rate lookup retries indefinitely, since a rate will exist.
+**Failure and retrying a charge.** Each charge retries five times with backoff; a decline is not retried within it.
+A failed charge leaves the bill `CHARGE_FAILED` but keeps the workflow open: a decline at month end is usually
+insufficient funds, which days fix. The workflow charges again automatically 1, 3 and 7 days after the first failure,
+and `POST /bills/:id/charge` charges again at once — after a customer tops up, say. Both run the same code; the bill ID
+stays the payment's idempotency key, so a retry after an ambiguous timeout — the provider took the money, the answer was
+lost — finds the earlier charge rather than taking it twice. Thirty days after the first failure the workflow completes
+with the bill still `CHARGE_FAILED`, its result readable rather than buried in a failed workflow. Bills that failed
+before retries existed replay without them, behind `workflow.GetVersion` — the replay test caught that. The
+exchange-rate lookup retries indefinitely, since a rate will exist.
 
 **Reads go through the worker.** A query replays the bill's history on a worker, so `GET` needs the worker up — here
 it runs in the API process, so they fail together.
@@ -183,7 +188,7 @@ reach the visibility query.
   `payment.Service`, plus dunning for `CHARGE_FAILED` bills.
 - **Service authentication** (mTLS or Encore auth handlers) and per-customer billing currency from the customer
   service rather than the request.
-- **Reconciling `CHARGE_FAILED`** against the provider, and a way to retry a charge.
+- **Reconciliation** of `CHARGE_FAILED` bills against the provider, and dunning beyond the 30-day window.
 
 ## Layout
 

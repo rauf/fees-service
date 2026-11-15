@@ -9,6 +9,7 @@ const (
 	ErrTypeLineItemConflict = "LineItemConflict"
 	ErrTypeInvalidLineItem  = "InvalidLineItem"
 	ErrTypePaymentDeclined  = "PaymentDeclined"
+	ErrTypeChargeNotFailed  = "ChargeNotFailed"
 	ErrTypeUnsupportedRate  = "UnsupportedRate"
 )
 

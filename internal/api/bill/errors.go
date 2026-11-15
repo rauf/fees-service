@@ -19,7 +19,7 @@ func toAPIError(err error) error {
 		switch appErr.Type() {
 		case workflow.ErrTypeInvalidLineItem:
 			return apiError(errs.InvalidArgument, appErr.Message())
-		case workflow.ErrTypeBillClosed:
+		case workflow.ErrTypeBillClosed, workflow.ErrTypeChargeNotFailed:
 			return apiError(errs.FailedPrecondition, appErr.Message())
 		case workflow.ErrTypeLineItemConflict:
 			return apiError(errs.AlreadyExists, appErr.Message())

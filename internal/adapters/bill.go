@@ -59,19 +59,21 @@ func BillFromDomain(b domain.Bill) *api.Bill {
 	}
 
 	return &api.Bill{
-		ID:            b.ID,
-		CustomerID:    b.CustomerID,
-		Period:        b.Period.String(),
-		Currency:      string(b.Currency),
-		Status:        string(b.Status),
-		Items:         items,
-		Subtotals:     subtotals,
-		Total:         total,
-		CloseReason:   string(b.CloseReason),
-		FailureReason: b.FailureReason,
-		CreatedAt:     b.CreatedAt,
-		CloseDeadline: b.CloseDeadline,
-		ClosedAt:      b.ClosedAt,
+		ID:             b.ID,
+		CustomerID:     b.CustomerID,
+		Period:         b.Period.String(),
+		Currency:       string(b.Currency),
+		Status:         string(b.Status),
+		Items:          items,
+		Subtotals:      subtotals,
+		Total:          total,
+		CloseReason:    string(b.CloseReason),
+		FailureReason:  b.FailureReason,
+		ChargeAttempts: b.ChargeAttempts,
+		NextChargeAt:   b.NextChargeAt,
+		CreatedAt:      b.CreatedAt,
+		CloseDeadline:  b.CloseDeadline,
+		ClosedAt:       b.ClosedAt,
 	}
 }
 

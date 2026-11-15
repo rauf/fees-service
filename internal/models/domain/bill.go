@@ -28,9 +28,13 @@ type Bill struct {
 	Total         *money.Money   `json:"total,omitempty"`
 	CloseReason   CloseReason    `json:"closeReason,omitempty"`
 	FailureReason string         `json:"failureReason,omitempty"`
-	CreatedAt     time.Time      `json:"createdAt"`
-	CloseDeadline time.Time      `json:"closeDeadline"`
-	ClosedAt      *time.Time     `json:"closedAt,omitempty"`
+	// ChargeAttempts counts charge runs, each with its own activity retries.
+	ChargeAttempts int `json:"chargeAttempts,omitempty"`
+	// NextChargeAt is when a CHARGE_FAILED bill is retried automatically; nil once none is left.
+	NextChargeAt  *time.Time `json:"nextChargeAt,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	CloseDeadline time.Time  `json:"closeDeadline"`
+	ClosedAt      *time.Time `json:"closedAt,omitempty"`
 }
 
 // LineItem is one fee, kept in the currency it was incurred in.
