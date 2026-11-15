@@ -21,13 +21,15 @@ Prerequisites: Go, Docker, and the Encore CLI (`brew install encoredev/tap/encor
 `curl -L https://encore.dev/install.sh | bash` on Linux).
 
 ```sh
-docker compose up -d    # Temporal on :7233, UI on http://localhost:8233
-encore run              # API + worker
+make up      # Temporal on :7233, UI on http://localhost:8233
+make run     # API + worker
+make test
+make lint    # needs golangci-lint v2
 ```
 
 ## Design
 
-See [AGENTS.md](AGENTS.md) for architecture and invariants. Highlights:
+See [AGENTS.md](AGENTS.md) for architecture and invariants. Full write-up lands with the API.
 
 - **Temporal is the store of state.** No bills table; the workflow's state is the bill.
 - **Add line item is a Temporal Update**, so a closed bill is rejected synchronously. **Close is a Signal.**
