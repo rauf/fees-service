@@ -1,0 +1,19 @@
+# Binaries
+*.exe
+*.test
+*.out
+/bin/
+
+# Encore
+.encore/
+encore.gen.go
+encore.gen.cue
+
+# Local env
+.env
+mise.local.toml
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
