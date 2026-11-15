@@ -8,7 +8,8 @@ formatters:
     - gofumpt
   settings:
     gofumpt:
-      extra-rules: true
+      extra:
+        group-params: true
 
 linters:
   default: standard
@@ -97,7 +98,7 @@ linters:
     exhaustive:
       check:
         - switch
-        - map
+        - mapliteral
     funcorder:
       struct-method: false
     funlen:
