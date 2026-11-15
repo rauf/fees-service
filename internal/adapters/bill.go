@@ -77,6 +77,11 @@ func BillFromDomain(b domain.Bill) *api.Bill {
 	}
 }
 
+// AddedLineItemFromDomain renders an add's answer.
+func AddedLineItemFromDomain(billID string, item domain.LineItem) *api.AddedLineItem {
+	return &api.AddedLineItem{BillID: billID, Item: lineItemFromDomain(item)}
+}
+
 // BillSummaryFromExecution reads a bill summary from a workflow's search attributes, so a list
 // needs no query per bill.
 func BillSummaryFromExecution(info *workflowpb.WorkflowExecutionInfo) (api.BillSummary, error) {

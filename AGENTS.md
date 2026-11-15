@@ -61,7 +61,9 @@ internal/services/payment/         Payment Service interface + stub
 - **Line item**: client-supplied `id` (idempotency key), `description`, `amount` (> 0), `currency`, optional
   `occurredAt` (defaults to `workflow.Now`). Explicit or defaulted, it must fall inside the period and not be more
   than `clockSkew` (5s) in the future. Same `id` + same
-  payload → no-op returning the bill; same `id` + different payload → conflict.
+  payload → no-op returning the existing item; same `id` + different payload → conflict.
+- **Bill size is capped** (`maxLineItems`, `maxDescriptionLength`, `lineItemIDPattern` in `lineitem.go`) so the
+  whole bill fits one 2 MB Temporal payload; `TestMaxBillFitsPayloadLimit` guards it. Raise a cap only with that test.
 - **Conversion happens at close**, using the daily rate for each item's `occurredAt` date, fetched in one activity
   batch. Each line is converted and rounded on its own; the total is the sum of converted lines.
 - **Status**: `OPEN → CLOSING → CHARGING → CHARGED | CHARGE_FAILED`. Line items only while `OPEN`. A bill with no
@@ -80,6 +82,9 @@ internal/services/payment/         Payment Service interface + stub
 
 ## Temporal
 
+- **Every payload is ≤ 2 MB or the workflow task fails** — update args and results, query results, continue-as-new
+  input. Update results are stored in history: a per-call update answers with what it changed (add → the item),
+  never the whole bill, or history grows quadratically.
 - **Messages**: add line item = **Update** (validator rejects synchronously). Close = **Update** that answers with
   the total, plus a **Signal** for fire-and-forget closers. Read = **Query**.
   List = visibility over search attributes `CustomerID`, `BillStatus`, `BillCurrency`, `BillPeriod`, `BillTotal`.

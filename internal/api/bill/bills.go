@@ -79,11 +79,12 @@ func (s *Service) CreateBill(ctx context.Context, req *api.CreateBillRequest) (*
 	return resp, nil
 }
 
-// AddLineItem adds a fee to an open bill and returns the bill. The item ID is an idempotency key:
-// an identical retry is a no-op, even after the bill has closed.
+// AddLineItem adds a fee to an open bill and answers with the item: 201 when added, 200 for an
+// identical retry, even after the bill has closed. The item ID is the idempotency key. It does
+// not answer with the bill, since every answer is stored in the bill's history; GetBill reads it.
 //
 //encore:api public method=POST path=/bills/:id/line-items
-func (s *Service) AddLineItem(ctx context.Context, id string, req *api.AddLineItemRequest) (*api.Bill, error) {
+func (s *Service) AddLineItem(ctx context.Context, id string, req *api.AddLineItemRequest) (*api.AddedLineItem, error) {
 	in, err := adapters.LineItemInputFromRequest(*req)
 	if err != nil {
 		return nil, apiError(errs.InvalidArgument, err.Error())
@@ -103,12 +104,18 @@ func (s *Service) AddLineItem(ctx context.Context, id string, req *api.AddLineIt
 		return nil, toAPIError(err)
 	}
 
-	var bill domain.Bill
-	if err := handle.Get(ctx, &bill); err != nil {
+	var result workflow.AddLineItemResult
+	if err := handle.Get(ctx, &result); err != nil {
 		return nil, toAPIError(err)
 	}
 
-	return adapters.BillFromDomain(bill), nil
+	resp := adapters.AddedLineItemFromDomain(id, result.Item)
+	resp.HTTPStatus = http.StatusOK
+	if result.Created {
+		resp.HTTPStatus = http.StatusCreated
+	}
+
+	return resp, nil
 }
 
 // CloseBill closes a bill and answers with the total being charged and every converted line,
@@ -248,17 +255,21 @@ func (s *Service) ListBills(ctx context.Context, req *api.ListBillsRequest) (*ap
 
 // retryOnFinishedBill answers an add to a bill whose workflow has completed, the same way the
 // open workflow would have: an identical retry succeeds, anything else is refused.
-func (s *Service) retryOnFinishedBill(ctx context.Context, id string, in domain.LineItemInput) (*api.Bill, error) {
+func (s *Service) retryOnFinishedBill(ctx context.Context, id string, in domain.LineItemInput) (*api.AddedLineItem, error) {
 	bill, err := s.queryBill(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := workflow.CheckAddToFinished(bill, in); err != nil {
+	item, err := workflow.CheckAddToFinished(bill, in)
+	if err != nil {
 		return nil, toAPIError(err)
 	}
 
-	return adapters.BillFromDomain(bill), nil
+	resp := adapters.AddedLineItemFromDomain(id, item)
+	resp.HTTPStatus = http.StatusOK
+
+	return resp, nil
 }
 
 // signalClose sends the fire-and-forget close. A finished bill can no longer be signalled;

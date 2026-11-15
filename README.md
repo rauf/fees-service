@@ -44,7 +44,8 @@ curl -X POST "$API/bills/$BILL/line-items" \
 curl -X POST "$API/bills/$BILL/line-items" \
   -d '{"id":"li_2","description":"Wire fee","amount":"5","currency":"USD","occurredAt":"2026-11-03T10:00:00Z"}'
 
-# Retrying li_2 is a no-op (200); reusing its ID for a different fee is a conflict (409).
+# Each add answers 201 with the item. Retrying li_2 is a no-op (200); reusing its ID for a different fee is a
+# conflict (409).
 curl -X POST "$API/bills/$BILL/line-items" \
   -d '{"id":"li_2","description":"Wire fee","amount":"6","currency":"USD"}'                # 409
 
@@ -70,7 +71,7 @@ All amounts are decimal strings (`"12.50"`), never JSON numbers.
 | Endpoint | Does | Success | Errors |
 |---|---|---|---|
 | `POST /bills` | Open a bill: `customerId`, `period` (`YYYY-MM`, UTC), `currency` | `201`; an identical retry `200` | `400` invalid input or a past month; `409` the bill exists in another currency or has finished |
-| `POST /bills/:id/line-items` | Add a fee: `id`, `description`, `amount`, `currency`, optional `occurredAt` | `200` with the bill | `400` invalid, or bill not open; `409` `id` reused with different details; `404` |
+| `POST /bills/:id/line-items` | Add a fee: `id` (`[A-Za-z0-9._:-]`, ≤ 128), `description` (≤ 200 characters), `amount`, `currency`, optional `occurredAt` | `201` with the item; an identical retry `200` | `400` invalid, bill not open, or bill at 1,000 items; `409` `id` reused with different details; `404` |
 | `POST /bills/:id/close` | Close the bill; answers once the total is final, before the charge | `200` with total and converted lines; `202` if the total is not ready within 10s | `404` |
 | `POST /bills/:id/close?async=true` | Signal the close and return at once, for batch closers | `202` with the bill as it stands | `404` |
 | `POST /bills/:id/charge` | Charge a `CHARGE_FAILED` bill again now, without waiting for its next automatic retry | `202` once the charge has started | `400` the bill is not `CHARGE_FAILED` or its retry window has closed; `404` |
@@ -92,7 +93,7 @@ sequenceDiagram
     A->>W: start (ID bill:cus:YYYY-MM)
     C->>A: POST /bills/:id/line-items
     A->>W: Update addLineItem
-    W-->>A: validator rejects, or the updated bill
+    W-->>A: validator rejects, or the added item
     C->>A: POST /bills/:id/close
     A->>W: Update closeBill (or Signal close with ?async=true, or the grace timer fires)
     W->>X: GetDailyRates (one batch)
@@ -158,8 +159,14 @@ exchange-rate lookup retries indefinitely, since a rate will exist.
 **Reads go through the worker.** A query replays the bill's history on a worker, so `GET` needs the worker up — here
 it runs in the API process, so they fail together.
 
-**Long bills** continue as new when Temporal suggests it, carrying the bill, so a customer with thousands of fees a
-month never hits the history limit.
+**Bill size.** Everything a workflow sends or receives is a payload in its history, and Temporal fails any workflow
+task that produces a payload over 2 MB. So an add answers with the one item, not the bill: answering with the bill
+made history grow with the square of the item count (100 items took 1.2 MB of history; now 0.1 MB), and once the bill
+passed 2 MB every add, and the close update, failed. The bill itself still travels whole — as the continue-as-new
+input, the query result and the close answer — so it is capped: 1,000 items, IDs of at most 128 safe characters,
+descriptions of at most 200 characters. A test builds the largest bill these allow and checks it fits (about 1.7 MB).
+A customer needing more lines a month would need the items held outside workflow state. History is still trimmed by
+continuing as new when Temporal suggests it, carrying the bill.
 
 **Listing** reads visibility (search attributes `CustomerID`, `BillStatus`, `BillPeriod`, `BillCurrency`,
 `BillTotal`), so a page of summaries costs one call rather than one query per bill. It is eventually consistent: a
@@ -171,6 +178,7 @@ reach the visibility query.
 - Callers are trusted internal services, so the endpoints are unauthenticated; customers never call this API.
 - A period is a UTC calendar month. Only the current or a future month can be opened.
 - Fees are positive. Credits and refunds would be a separate line type.
+- A bill holds at most 1,000 line items a month; see [Bill size](#design).
 - The FX and payment providers are stubs: a fixed USD/GEL rate of 2.70 for every date, and a provider that accepts
   every charge except for `cus_decline*` customers.
 - The Temporal worker runs inside the API process.

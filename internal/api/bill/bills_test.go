@@ -97,18 +97,21 @@ func TestAddLineItem(t *testing.T) {
 	finished := domain.Bill{ID: id, Status: domain.StatusCharged, Items: []domain.LineItem{item}}
 
 	tests := map[string]struct {
-		req       api.AddLineItemRequest
-		updateErr error
-		resultErr error
-		queryErr  error
-		wantCode  errs.ErrCode
+		req        api.AddLineItemRequest
+		result     workflow.AddLineItemResult
+		updateErr  error
+		resultErr  error
+		queryErr   error
+		wantStatus int
+		wantCode   errs.ErrCode
 	}{
-		"accepted":                  {req: req("li_2", "1.00")},
+		"added":                     {req: req("li_2", "1.00"), result: workflow.AddLineItemResult{Item: domain.LineItem{ID: "li_2"}, Created: true}, wantStatus: http.StatusCreated},
+		"identical retry":           {req: req("li_1", "1.00"), result: workflow.AddLineItemResult{Item: item}, wantStatus: http.StatusOK},
 		"bad amount":                {req: req("li_2", "1.001"), wantCode: errs.InvalidArgument},
 		"invalid item":              {req: req("li_2", "1.00"), resultErr: appErr(workflow.ErrTypeInvalidLineItem), wantCode: errs.InvalidArgument},
 		"closed bill":               {req: req("li_2", "1.00"), resultErr: appErr(workflow.ErrTypeBillClosed), wantCode: errs.FailedPrecondition},
 		"conflicting retry":         {req: req("li_1", "2.00"), resultErr: appErr(workflow.ErrTypeLineItemConflict), wantCode: errs.AlreadyExists},
-		"finished, identical retry": {req: req("li_1", "1.00"), updateErr: notFound()},
+		"finished, identical retry": {req: req("li_1", "1.00"), updateErr: notFound(), wantStatus: http.StatusOK},
 		"finished, conflicting":     {req: req("li_1", "2.00"), updateErr: notFound(), wantCode: errs.AlreadyExists},
 		"finished, new item":        {req: req("li_2", "1.00"), updateErr: notFound(), wantCode: errs.FailedPrecondition},
 		"no such bill":              {req: req("li_2", "1.00"), updateErr: notFound(), queryErr: notFound(), wantCode: errs.NotFound},
@@ -120,23 +123,21 @@ func TestAddLineItem(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c := mocks.NewClient(t)
 			if tc.wantCode != errs.InvalidArgument || tc.resultErr != nil {
-				handle := mocks.NewWorkflowUpdateHandle(t)
-				if tc.updateErr == nil {
-					handle.On("Get", mock.Anything, mock.Anything).Return(tc.resultErr)
-				}
-
-				c.On("UpdateWorkflow", mock.Anything, mock.MatchedBy(func(o client.UpdateWorkflowOptions) bool {
-					return o.WorkflowID == id && o.UpdateName == workflow.UpdateAddLineItem
-				})).Return(handle, tc.updateErr)
+				expectAddUpdate(t, c, id, tc.result, tc.updateErr, tc.resultErr)
 			}
 
 			if isNotFound(tc.updateErr) {
 				expectQuery(t, c, id, finished, tc.queryErr)
 			}
 
-			_, err := (&Service{client: c}).AddLineItem(t.Context(), id, &tc.req)
+			got, err := (&Service{client: c}).AddLineItem(t.Context(), id, &tc.req)
 
 			assertResult(t, tc.wantCode, err)
+			if tc.wantCode == errs.OK {
+				assert.Equal(t, tc.wantStatus, got.HTTPStatus)
+				assert.Equal(t, tc.req.ID, got.Item.ID)
+				assert.Equal(t, id, got.BillID)
+			}
 		})
 	}
 }
@@ -383,6 +384,25 @@ func expectQuery(t *testing.T, c *mocks.Client, id string, bill domain.Bill, err
 	payloads, convErr := converter.GetDefaultDataConverter().ToPayloads(bill)
 	require.NoError(t, convErr)
 	c.On("QueryWorkflow", mock.Anything, id, "", workflow.QueryGetBill).Return(client.NewValue(payloads), nil).Maybe()
+}
+
+// expectAddUpdate expects the add-line-item update; unless it fails to send, its result is result
+// or resultErr.
+func expectAddUpdate(t *testing.T, c *mocks.Client, id string, result workflow.AddLineItemResult, updateErr, resultErr error) {
+	t.Helper()
+
+	handle := mocks.NewWorkflowUpdateHandle(t)
+	if updateErr == nil {
+		handle.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+			if dst, ok := args.Get(1).(*workflow.AddLineItemResult); ok {
+				*dst = result
+			}
+		}).Return(resultErr)
+	}
+
+	c.On("UpdateWorkflow", mock.Anything, mock.MatchedBy(func(o client.UpdateWorkflowOptions) bool {
+		return o.WorkflowID == id && o.UpdateName == workflow.UpdateAddLineItem
+	})).Return(handle, updateErr)
 }
 
 func assertResult(t *testing.T, wantCode errs.ErrCode, err error) {

@@ -69,6 +69,15 @@ type Bill struct {
 	ClosedAt      *time.Time `json:"closedAt,omitempty"`
 }
 
+// AddedLineItem answers an add: the item as the bill holds it. Read the bill for its totals.
+type AddedLineItem struct {
+	// HTTPStatus is 201 for a new item and 200 for an identical retry.
+	HTTPStatus int `encore:"httpstatus" json:"-"`
+
+	BillID string   `json:"billId"`
+	Item   LineItem `json:"item"`
+}
+
 // LineItem is one fee in the currency it was incurred in, plus its converted amount once closed.
 type LineItem struct {
 	ID          string      `json:"id"`
