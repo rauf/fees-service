@@ -10,8 +10,8 @@ orchestration). Each bill is one Temporal workflow; Temporal is the store of sta
 
 `make` targets are the interface; `make help` lists them. `make lint` and `make test` pass before anything is "done".
 
-- `make smoke` and `make replay/record` need `make up` and `make run` first. Wait for Encore's "development server
-  running" line, not for `:4000` to answer: the port opens before the app has compiled.
+- `make smoke` and `make replay/record` need `make up` and `make run` first. Wait until `GET /bills` answers 200, as
+  CI does, not for `:4000` to open: the port opens before the app has compiled.
 - `make replay/record` reads histories with `docker compose exec temporal`, so it must run in the compose project that
   started Temporal; if another checkout's project owns `:7233`, set `COMPOSE_PROJECT_NAME` to it.
 - The app reads `TEMPORAL_ADDRESS` (default `localhost:7233`). `make up` sets the namespace's retention to 365 days,
