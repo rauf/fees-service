@@ -22,7 +22,7 @@ type Activities struct {
 func (a *Activities) GetDailyRates(ctx context.Context, reqs []fx.RateRequest) ([]fx.Rate, error) {
 	rates, err := a.Rates.GetDailyRates(ctx, reqs)
 	if errors.Is(err, fx.ErrUnsupportedPair) {
-		return nil, temporal.NewNonRetryableApplicationError(err.Error(), ErrTypeUnsupportedRate, err)
+		return nil, temporal.NewNonRetryableApplicationError(err.Error(), errTypeUnsupportedRate, err)
 	}
 
 	if err != nil {
@@ -37,7 +37,7 @@ func (a *Activities) GetDailyRates(ctx context.Context, reqs []fx.RateRequest) (
 func (a *Activities) Charge(ctx context.Context, req payment.ChargeRequest) error {
 	err := a.Payments.Charge(ctx, req)
 	if errors.Is(err, payment.ErrDeclined) {
-		return temporal.NewNonRetryableApplicationError(err.Error(), ErrTypePaymentDeclined, err)
+		return temporal.NewNonRetryableApplicationError(err.Error(), errTypePaymentDeclined, err)
 	}
 
 	if err != nil {

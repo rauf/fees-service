@@ -4,8 +4,6 @@ package workflow
 import (
 	"time"
 
-	"go.temporal.io/sdk/temporal"
-
 	"github.com/rauf/fees-service/internal/models/domain"
 	"github.com/rauf/fees-service/internal/money"
 )
@@ -22,10 +20,10 @@ type BillInput struct {
 	Resume *domain.Bill `json:"resume,omitempty"`
 }
 
-// AddLineItemResult answers an add-line-item update. It carries the one item rather than the
+// addLineItemResult answers an add-line-item update. It carries the one item rather than the
 // bill: every update result is stored in history, so returning the bill would grow history
 // quadratically and eventually exceed Temporal's payload limit.
-type AddLineItemResult struct {
+type addLineItemResult struct {
 	Item domain.LineItem `json:"item"`
 	// Created is false when the add was an identical retry of an item already on the bill.
 	Created bool `json:"created"`
@@ -34,23 +32,14 @@ type AddLineItemResult struct {
 // Names shared by the worker and the API's Temporal client.
 const (
 	TaskQueue         = "fees"
-	UpdateAddLineItem = "addLineItem"
-	// UpdateClose and SignalClose both close a bill: the update answers with the total, the signal
+	updateAddLineItem = "addLineItem"
+	// updateClose and signalClose both close a bill: the update answers with the total, the signal
 	// is fire-and-forget for batch closers.
-	UpdateClose = "closeBill"
-	SignalClose = "close"
-	// UpdateRetryCharge runs the charge again on a CHARGE_FAILED bill.
-	UpdateRetryCharge = "retryCharge"
-	QueryGetBill      = "getBill"
+	updateClose = "closeBill"
+	signalClose = "close"
+	// updateRetryCharge runs the charge again on a CHARGE_FAILED bill.
+	updateRetryCharge = "retryCharge"
+	queryGetBill      = "getBill"
 )
 
 const DefaultGracePeriod = 7 * 24 * time.Hour
-
-// Search attributes; each must be registered on the Temporal server (compose.yaml).
-var (
-	SearchAttrCustomerID = temporal.NewSearchAttributeKeyKeyword("CustomerID")
-	SearchAttrStatus     = temporal.NewSearchAttributeKeyKeyword("BillStatus")
-	SearchAttrCurrency   = temporal.NewSearchAttributeKeyKeyword("BillCurrency")
-	SearchAttrPeriod     = temporal.NewSearchAttributeKeyKeyword("BillPeriod")
-	SearchAttrTotal      = temporal.NewSearchAttributeKeyInt64("BillTotal")
-)

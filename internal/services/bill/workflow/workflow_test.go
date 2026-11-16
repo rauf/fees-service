@@ -44,7 +44,7 @@ var (
 func TestBillWorkflowChargesConvertedTotal(t *testing.T) {
 	bt := newBillTest(t, &fakePayments{})
 
-	var added, retried AddLineItemResult
+	var added, retried addLineItemResult
 	bt.add(t, time.Minute, domain.LineItemInput{ID: "li_1", Description: "Card issuance", Amount: gel(1000)}, nil)
 	bt.add(t, 2*time.Minute, domain.LineItemInput{ID: "li_2", Description: "Wire fee", Amount: usd(500)}, &added)
 	bt.add(t, 150*time.Second, domain.LineItemInput{ID: "li_2", Description: "Wire fee", Amount: usd(500)}, &retried)
@@ -60,8 +60,8 @@ func TestBillWorkflowChargesConvertedTotal(t *testing.T) {
 
 	wantItem := bill.Items[1]
 	wantItem.Conversion = nil
-	assert.Equal(t, AddLineItemResult{Item: wantItem, Created: true}, added, "update answers with the added item")
-	assert.Equal(t, AddLineItemResult{Item: wantItem}, retried, "a retry answers with the existing item")
+	assert.Equal(t, addLineItemResult{Item: wantItem, Created: true}, added, "update answers with the added item")
+	assert.Equal(t, addLineItemResult{Item: wantItem}, retried, "a retry answers with the existing item")
 	assert.Equal(t, domain.StatusCharged, bill.Status)
 	assert.Equal(t, domain.CloseReasonManual, bill.CloseReason)
 	assert.Equal(t, testStart.Add(time.Hour), *bill.ClosedAt)
@@ -194,7 +194,7 @@ func TestBillWorkflowManualRetry(t *testing.T) {
 // must not fire straight after it.
 func TestBillWorkflowRetrySkipsOverdueSchedule(t *testing.T) {
 	bt := newBillTest(t, &fakePayments{})
-	declined := temporal.NewNonRetryableApplicationError("payment declined", ErrTypePaymentDeclined, nil)
+	declined := temporal.NewNonRetryableApplicationError("payment declined", errTypePaymentDeclined, nil)
 	var calls []time.Duration
 	// AfterFn runs when the charge starts, before its delay; Run would only run after it.
 	bt.env.OnActivity((&Activities{}).Charge, mock.Anything, mock.Anything).
@@ -290,19 +290,19 @@ func newBillTest(t *testing.T, payments *fakePayments) *billTest {
 
 // add sends an add-line-item update after delay; it must be accepted. Its result is stored in
 // result when non-nil.
-func (bt *billTest) add(t *testing.T, delay time.Duration, in domain.LineItemInput, result *AddLineItemResult) {
+func (bt *billTest) add(t *testing.T, delay time.Duration, in domain.LineItemInput, result *addLineItemResult) {
 	t.Helper()
 
 	bt.updates++
 	updateID := fmt.Sprintf("update-%d", bt.updates)
 	bt.env.RegisterDelayedCallback(func() {
-		bt.env.UpdateWorkflow(UpdateAddLineItem, updateID, &testsuite.TestUpdateCallback{
+		bt.env.UpdateWorkflow(updateAddLineItem, updateID, &testsuite.TestUpdateCallback{
 			OnAccept: func() {},
 			OnReject: func(err error) { t.Errorf("update %s rejected: %v", in.ID, err) },
 			OnComplete: func(v any, err error) {
 				require.NoError(t, err)
 				if result != nil {
-					added, ok := v.(AddLineItemResult)
+					added, ok := v.(addLineItemResult)
 					require.True(t, ok)
 					*result = added
 				}
@@ -317,7 +317,7 @@ func (bt *billTest) sendCloseUpdate(t *testing.T, result *domain.Bill) {
 	t.Helper()
 
 	bt.updates++
-	bt.env.UpdateWorkflow(UpdateClose, fmt.Sprintf("update-%d", bt.updates), &testsuite.TestUpdateCallback{
+	bt.env.UpdateWorkflow(updateClose, fmt.Sprintf("update-%d", bt.updates), &testsuite.TestUpdateCallback{
 		OnAccept: func() {},
 		OnReject: func(err error) { t.Errorf("close rejected: %v", err) },
 		OnComplete: func(v any, err error) {
@@ -335,7 +335,7 @@ func (bt *billTest) sendRetryUpdate(t *testing.T, result *domain.Bill) {
 	t.Helper()
 
 	bt.updates++
-	bt.env.UpdateWorkflow(UpdateRetryCharge, fmt.Sprintf("update-%d", bt.updates), &testsuite.TestUpdateCallback{
+	bt.env.UpdateWorkflow(updateRetryCharge, fmt.Sprintf("update-%d", bt.updates), &testsuite.TestUpdateCallback{
 		OnAccept: func() {},
 		OnReject: func(err error) { t.Errorf("retry rejected: %v", err) },
 		OnComplete: func(v any, err error) {
@@ -348,13 +348,13 @@ func (bt *billTest) sendRetryUpdate(t *testing.T, result *domain.Bill) {
 }
 
 func (bt *billTest) closeAt(delay time.Duration) {
-	bt.env.RegisterDelayedCallback(func() { bt.env.SignalWorkflow(SignalClose, nil) }, delay)
+	bt.env.RegisterDelayedCallback(func() { bt.env.SignalWorkflow(signalClose, nil) }, delay)
 }
 
 func (bt *billTest) query(t *testing.T) domain.Bill {
 	t.Helper()
 
-	val, err := bt.env.QueryWorkflow(QueryGetBill)
+	val, err := bt.env.QueryWorkflow(queryGetBill)
 	require.NoError(t, err)
 
 	var bill domain.Bill

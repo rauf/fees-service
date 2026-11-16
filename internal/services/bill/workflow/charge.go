@@ -111,12 +111,21 @@ func (s *billState) runCharge(ctx workflow.Context) {
 }
 
 func (s *billState) validateRetry() error {
-	if s.bill.Status != domain.StatusChargeFailed || s.retryWindowClosed {
-		return temporal.NewApplicationError(fmt.Sprintf("bill is %s; only a CHARGE_FAILED bill can be charged again",
-			s.bill.Status), ErrTypeChargeNotFailed)
-	}
+	return retryRefusal(s.bill.Status, s.retryWindowClosed)
+}
 
-	return nil
+// retryRefusal decides whether a bill in status can be charged again; nil means it can. It answers
+// both the open workflow's validator and a retry on a bill whose workflow has completed.
+func retryRefusal(status domain.Status, windowClosed bool) error {
+	switch {
+	case status != domain.StatusChargeFailed:
+		return temporal.NewApplicationError(fmt.Sprintf("bill is %s; only a CHARGE_FAILED bill can be charged again",
+			status), errTypeChargeNotFailed)
+	case windowClosed:
+		return temporal.NewApplicationError("the retry window for this bill has closed", errTypeChargeNotFailed)
+	default:
+		return nil
+	}
 }
 
 // requestRetry asks for a charge now and answers once it has started, not when it finishes: the
@@ -130,7 +139,7 @@ func (s *billState) requestRetry(ctx workflow.Context) (domain.Bill, error) {
 
 	// Accepted as the window closed: no charge ran, so this is a refusal, not a started retry.
 	if s.bill.Status == domain.StatusChargeFailed {
-		return domain.Bill{}, temporal.NewApplicationError("the retry window for this bill has closed", ErrTypeChargeNotFailed)
+		return domain.Bill{}, retryRefusal(s.bill.Status, true)
 	}
 
 	return s.bill, nil

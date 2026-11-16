@@ -63,6 +63,17 @@ type LineItemInput struct {
 	OccurredAt *time.Time `json:"occurredAt,omitempty"`
 }
 
+// BillSummary is a bill without its line items, as listing reads it from search attributes.
+type BillSummary struct {
+	ID         string
+	CustomerID string
+	Period     Period
+	Currency   money.Currency
+	Status     Status
+	// Total is set once the bill has been converted, from CHARGING on.
+	Total *money.Money
+}
+
 const (
 	StatusOpen         Status = "OPEN"
 	StatusClosing      Status = "CLOSING"

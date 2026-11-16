@@ -29,7 +29,7 @@ internal/models/domain/            Bill, LineItem, Conversion, LineItemInput, St
 internal/models/api/               HTTP request/response types
 internal/adapters/                 domain ↔ api mapping — the only place it lives
 internal/api/bill/                 Encore service — HTTP only: validate, call Temporal, map errors to errs.Code
-internal/services/bill/workflow/   Temporal workflow, activities, BillInput, message names — NO encore imports
+internal/services/bill/workflow/   Temporal workflow, activities, Bills (the client side), BillInput — NO encore imports
 internal/services/fx/              Exchange-rate Service interface + fixed-table stub
 internal/services/payment/         Payment Service interface + stub
 ```
@@ -38,6 +38,9 @@ internal/services/payment/         Payment Service interface + stub
   readable by bills already running.
 - Workflow plumbing (`BillInput`, message names, search-attribute keys) stays in `workflow/`; `fx`/`payment` request
   types stay with their service interfaces.
+- **`workflow.Bills` is the only Temporal client caller.** It owns start options, update names and wait stages, the
+  completed-workflow fallback and visibility queries, and speaks domain types. Message names and search-attribute
+  keys stay unexported so the protocol never crosses into `api/`.
 - **`workflow/` never imports Encore.** A package that declares an Encore service only tests under `encore test`;
   keeping Temporal code apart lets plain `go test` run it, and lets it move to its own worker binary unchanged. The
   worker runs inside the Encore process for now (started in `initService`).
@@ -113,12 +116,13 @@ internal/services/payment/         Payment Service interface + stub
 ## Errors
 
 - Wrap with context: `fmt.Errorf("add line item: %w", err)`. Sentinels live in each package's `errors.go`.
-- `workflow` reports rejections as `temporal.ApplicationError` types (`errors.go`); `api/bill/errors.go` maps them to
-  `errs.Code`: invalid input → InvalidArgument (400), bill no longer open → FailedPrecondition (400), conflicting
+- Inside the workflow, rejections are `temporal.ApplicationError` types (`errors.go`). `Bills` turns them and Temporal's
+  own errors into `workflow` sentinels wrapped as `"%w: <public message>"`; `api/bill/errors.go` maps the sentinels to
+  `errs.Code` with `errors.Is`: invalid input → InvalidArgument (400), bill no longer open → FailedPrecondition (400), conflicting
   retry or duplicate bill → AlreadyExists (409), unknown bill → NotFound, Temporal down → Unavailable.
 - Public error messages never carry the cause (Encore appends it to the message). Anything unmapped is logged with
   `rlog` and returned as Internal.
-- An add or close on a bill whose workflow has completed gets NotFound from Temporal; the API then queries the bill
+- An add or close on a bill whose workflow has completed gets NotFound from Temporal; `Bills` then queries the bill
   so an identical retry still succeeds and only a truly unknown bill is a 404.
 - Fix the cause, not the symptom. An error swallowed to go green is still a bug.
 
@@ -129,7 +133,9 @@ Test where a bug is silent or expensive — money math, workflow state transitio
 - **Table-driven by default**: `map[string]struct{…}` looped with `t.Run`. Add a case, not a copy-pasted test.
 - Workflows: `testsuite.WorkflowTestSuite` — time-skipping for timers, `env.OnActivity` for activities,
   `RegisterDelayedCallback` to send signals/updates mid-run.
-- API: `go.temporal.io/sdk/mocks` client mock. No mockery; the two provider interfaces get hand-written fakes.
+- `Bills`: `go.temporal.io/sdk/mocks` client mock, one table per operation. HTTP tests build a real `Bills` on the
+  same mock and check only status codes and error mapping. No mockery; the two provider interfaces get hand-written
+  fakes.
 - testify: `require` stops, `assert` continues.
 - End to end: `tests/<service>/`, black-box over HTTP against `make up` + `make run` (`API_URL` overrides the
   default `http://localhost:4000`). Build tag `e2e`, so `make test` stays offline; CI runs them in their own job. Use a

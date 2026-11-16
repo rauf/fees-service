@@ -7,9 +7,6 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	commonpb "go.temporal.io/api/common/v1"
-	workflowpb "go.temporal.io/api/workflow/v1"
-	"go.temporal.io/sdk/converter"
 
 	"github.com/rauf/fees-service/internal/models/api"
 	"github.com/rauf/fees-service/internal/models/domain"
@@ -74,40 +71,37 @@ func TestBillFromDomain(t *testing.T) {
 	assert.Equal(t, &api.Money{Amount: "13.50", Currency: "GEL"}, got.Total)
 }
 
-func TestBillSummaryFromExecution(t *testing.T) {
+func TestListFilterFromRequest(t *testing.T) {
 	tests := map[string]struct {
-		attrs map[string]any
-		want  api.BillSummary
+		req     api.ListBillsRequest
+		wantErr error
 	}{
-		"open bill has no total": {
-			attrs: map[string]any{"CustomerID": "cus_1", "BillPeriod": "2026-11", "BillCurrency": "GEL", "BillStatus": "OPEN"},
-			want:  api.BillSummary{ID: "bill:cus_1:2026-11", CustomerID: "cus_1", Period: "2026-11", Currency: "GEL", Status: "OPEN"},
-		},
-		"charged bill has its total": {
-			attrs: map[string]any{"CustomerID": "cus_1", "BillPeriod": "2026-11", "BillCurrency": "GEL", "BillStatus": "CHARGED", "BillTotal": int64(2350)},
-			want: api.BillSummary{
-				ID: "bill:cus_1:2026-11", CustomerID: "cus_1", Period: "2026-11", Currency: "GEL", Status: "CHARGED",
-				Total: &api.Money{Amount: "23.50", Currency: "GEL"},
-			},
-		},
+		"no filters":           {},
+		"all filters":          {req: api.ListBillsRequest{CustomerID: "cus_1", Status: "OPEN", Period: "2026-11", Currency: "GEL"}},
+		"bad period":           {req: api.ListBillsRequest{Period: "2026-1"}, wantErr: domain.ErrInvalidPeriod},
+		"unsupported currency": {req: api.ListBillsRequest{Currency: "EUR"}, wantErr: money.ErrUnsupportedCurrency},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			fields := map[string]*commonpb.Payload{}
-			for k, v := range tc.attrs {
-				p, err := converter.GetDefaultDataConverter().ToPayload(v)
-				require.NoError(t, err)
-				fields[k] = p
+			got, err := ListFilterFromRequest(tc.req)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+
+				return
 			}
 
-			got, err := BillSummaryFromExecution(&workflowpb.WorkflowExecutionInfo{
-				Execution:        &commonpb.WorkflowExecution{WorkflowId: "bill:cus_1:2026-11"},
-				SearchAttributes: &commonpb.SearchAttributes{IndexedFields: fields},
-			})
-
 			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.req.Period, periodString(got.Period))
+			assert.Equal(t, tc.req.Currency, string(got.Currency))
 		})
 	}
+}
+
+func periodString(p domain.Period) string {
+	if p.IsZero() {
+		return ""
+	}
+
+	return p.String()
 }
