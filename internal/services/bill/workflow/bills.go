@@ -223,16 +223,16 @@ func (b *Bills) addToFinished(ctx context.Context, id string, in domain.LineItem
 		return domain.LineItem{}, false, err
 	}
 
-	// A completed workflow's bill is past OPEN, so the ledger answers as the validator would have:
-	// the item already there on an identical retry, a refusal otherwise.
+	// A completed workflow accepts nothing new, whatever status it stopped in — a terminated or
+	// failed one can still be OPEN or CLOSING. Only a retry of an item already there succeeds.
 	l := resumeLedger(bill)
+	if _, retry := l.index[in.ID]; !retry {
+		return domain.LineItem{}, false, billsError("add line item to "+id, billClosedError(bill.Status))
+	}
+
 	existing, err := l.checkAdd(b.now(), in)
 	if err != nil {
 		return domain.LineItem{}, false, billsError("add line item to "+id, err)
-	}
-
-	if existing == nil {
-		return domain.LineItem{}, false, fmt.Errorf("add line item to %s: completed bill is still %s", id, bill.Status)
 	}
 
 	return *existing, false, nil

@@ -80,11 +80,13 @@ func TestBillsAddLineItem(t *testing.T) {
 	finished := domain.Bill{ID: testBillID, Status: domain.StatusCharged, Items: []domain.LineItem{item}}
 
 	tests := map[string]struct {
-		in          domain.LineItemInput
-		result      addLineItemResult
-		updateErr   error
-		resultErr   error
-		queryErr    error
+		in        domain.LineItemInput
+		result    addLineItemResult
+		updateErr error
+		resultErr error
+		queryErr  error
+		// finishedAs is the status the completed workflow stopped in; CHARGED when unset.
+		finishedAs  domain.Status
 		wantItem    string
 		wantCreated bool
 		wantErr     error
@@ -101,6 +103,8 @@ func TestBillsAddLineItem(t *testing.T) {
 		"finished, identical retry": {in: input("li_1", 100), updateErr: notFound(), wantItem: "li_1"},
 		"finished, conflicting":     {in: input("li_1", 200), updateErr: notFound(), wantErr: ErrLineItemConflict},
 		"finished, new item":        {in: input("li_2", 100), updateErr: notFound(), wantErr: ErrBillClosed, wantMsg: "bill closed: bill is CHARGED"},
+		"terminated while open":     {in: input("li_2", 100), updateErr: notFound(), finishedAs: domain.StatusOpen, wantErr: ErrBillClosed, wantMsg: "bill closed: bill is OPEN"},
+		"terminated, retry":         {in: input("li_1", 100), updateErr: notFound(), finishedAs: domain.StatusOpen, wantItem: "li_1"},
 		"no such bill":              {in: input("li_2", 100), updateErr: notFound(), queryErr: notFound(), wantErr: ErrBillNotFound, wantMsg: "bill not found"},
 		"temporal down":             {in: input("li_2", 100), updateErr: serviceerror.NewUnavailable("down"), wantErr: ErrUnavailable},
 		"unexpected error":          {in: input("li_2", 100), updateErr: errors.New("boom"), wantMsg: "add line item to " + testBillID + ": boom"},
@@ -118,7 +122,7 @@ func TestBillsAddLineItem(t *testing.T) {
 			})
 
 			if isNotFound(tc.updateErr) {
-				expectQuery(t, c, finished, tc.queryErr)
+				expectQuery(t, c, stoppedAs(finished, tc.finishedAs), tc.queryErr)
 			}
 
 			got, created, err := newTestBills(c).AddLineItem(t.Context(), testBillID, tc.in)
@@ -320,6 +324,15 @@ func TestBillsList(t *testing.T) {
 			assert.Len(t, got, 1)
 		})
 	}
+}
+
+// stoppedAs is bill as its completed workflow left it: in status, or as it is when status is unset.
+func stoppedAs(bill domain.Bill, status domain.Status) domain.Bill {
+	if status != "" {
+		bill.Status = status
+	}
+
+	return bill
 }
 
 func newTestBills(c client.Client) *Bills {
