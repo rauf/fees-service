@@ -23,12 +23,14 @@ wait_for() {
 }
 
 record() {
-  local name=$1 customer=$2 currency=$3 close=$4 retry=${6:-}
+  local name=$1 customer=$2 currency=$3 close=$4 retry=${6:-} items=${7:-yes}
   local id="bill:${customer}:${PERIOD}"
   post /bills "{\"customerId\":\"$customer\",\"period\":\"$PERIOD\",\"currency\":\"$currency\"}"
-  post "/bills/$id/line-items" '{"id":"li_1","description":"Card issuance","amount":"10.00","currency":"GEL"}'
-  post "/bills/$id/line-items" "{\"id\":\"li_2\",\"description\":\"Wire fee\",\"amount\":\"5\",\"currency\":\"USD\",\"occurredAt\":\"$MONTH_START\"}"
-  post "/bills/$id/line-items" '{"id":"li_1","description":"Card issuance","amount":"10.00","currency":"GEL"}'
+  if [ "$items" = yes ]; then
+    post "/bills/$id/line-items" '{"id":"li_1","description":"Card issuance","amount":"10.00","currency":"GEL"}'
+    post "/bills/$id/line-items" "{\"id\":\"li_2\",\"description\":\"Wire fee\",\"amount\":\"5\",\"currency\":\"USD\",\"occurredAt\":\"$MONTH_START\"}"
+    post "/bills/$id/line-items" '{"id":"li_1","description":"Card issuance","amount":"10.00","currency":"GEL"}'
+  fi
   post "/bills/$id/close$close"
   wait_for "$id" "\"status\": *\"$5\""
   if [ -n "$retry" ]; then
@@ -48,3 +50,4 @@ record charged "cus_replay_${RUN}" GEL "" CHARGED
 record declined "cus_decline_replay_${RUN}" GEL "" CHARGE_FAILED
 record async_close "cus_replay_async_${RUN}" USD "?async=true" CHARGED
 record declined_retried "cus_decline_retry_${RUN}" GEL "" CHARGE_FAILED retry
+record empty "cus_replay_empty_${RUN}" GEL "" CHARGED "" no
