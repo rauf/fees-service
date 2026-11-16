@@ -4,8 +4,6 @@ package workflow
 import (
 	"time"
 
-	"go.temporal.io/sdk/temporal"
-
 	"github.com/rauf/fees-service/internal/models/domain"
 	"github.com/rauf/fees-service/internal/money"
 )
@@ -45,12 +43,3 @@ const (
 )
 
 const DefaultGracePeriod = 7 * 24 * time.Hour
-
-// Search attributes; each must be registered on the Temporal server (compose.yaml).
-var (
-	searchAttrCustomerID = temporal.NewSearchAttributeKeyKeyword("CustomerID")
-	searchAttrStatus     = temporal.NewSearchAttributeKeyKeyword("BillStatus")
-	searchAttrCurrency   = temporal.NewSearchAttributeKeyKeyword("BillCurrency")
-	searchAttrPeriod     = temporal.NewSearchAttributeKeyKeyword("BillPeriod")
-	searchAttrTotal      = temporal.NewSearchAttributeKeyInt64("BillTotal")
-)
