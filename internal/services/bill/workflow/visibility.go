@@ -31,7 +31,7 @@ var (
 )
 
 // startAttributes are a new bill's search attributes; the workflow keeps BillStatus and BillTotal
-// current from then on (setStatus).
+// current from then on (billState.transition).
 func startAttributes(in BillInput) temporal.SearchAttributes {
 	return temporal.NewSearchAttributes(
 		searchAttrCustomerID.ValueSet(in.CustomerID),

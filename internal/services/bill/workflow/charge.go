@@ -1,7 +1,6 @@
 package workflow
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
@@ -9,7 +8,6 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/rauf/fees-service/internal/models/domain"
-	"github.com/rauf/fees-service/internal/services/payment"
 )
 
 // chargeRetryChange guards the retry loop: bills that ended CHARGE_FAILED before it existed
@@ -27,9 +25,20 @@ var chargeRetrySchedule = []time.Duration{24 * time.Hour, 3 * 24 * time.Hour, 7 
 // charge collects the total. A failed charge is a bill state, not a workflow failure, so the
 // bill stays readable as the workflow's result.
 func (s *billState) charge(ctx workflow.Context) error {
-	s.runCharge(ctx)
+	var chargeErr error
+	if req, ok := s.ledger.chargeRequest(); ok {
+		var a *Activities
+		actx := workflow.WithActivityOptions(ctx, paymentActivityOptions)
+		// The status changes only once the charge has answered: queries and waiting updates read it
+		// while the activity runs.
+		chargeErr = workflow.ExecuteActivity(actx, a.Charge, req).Get(actx, nil)
+	}
 
-	return s.setStatus(ctx, s.bill.Status)
+	return s.transition(ctx, func(l *ledger) error {
+		l.chargeResult(chargeErr)
+
+		return nil
+	})
 }
 
 // retryCharges keeps a CHARGE_FAILED bill open: it charges again on the automatic schedule or
@@ -38,13 +47,15 @@ func (s *billState) retryCharges(ctx workflow.Context) error {
 	firstFailure := workflow.Now(ctx)
 	windowEnd := firstFailure.Add(chargeRetryWindow)
 
-	for scheduled := 0; s.bill.Status == domain.StatusChargeFailed; {
+	for scheduled := 0; s.ledger.bill.Status == domain.StatusChargeFailed; {
 		next := windowEnd
-		s.bill.NextChargeAt = nil
+		var nextCharge *time.Time
 		if scheduled < len(chargeRetrySchedule) {
 			next = firstFailure.Add(chargeRetrySchedule[scheduled])
-			s.bill.NextChargeAt = &next
+			nextCharge = &next
 		}
+
+		s.ledger.scheduleRetry(nextCharge)
 
 		requested, err := workflow.AwaitWithTimeout(ctx, max(next.Sub(workflow.Now(ctx)), 0),
 			func() bool { return s.retryRequested })
@@ -63,9 +74,12 @@ func (s *billState) retryCharges(ctx workflow.Context) error {
 			return nil
 		}
 
-		s.bill.NextChargeAt = nil
-		s.bill.FailureReason = ""
-		if err := s.setStatus(ctx, domain.StatusCharging); err != nil {
+		err = s.transition(ctx, func(l *ledger) error {
+			l.retry()
+
+			return nil
+		})
+		if err != nil {
 			return err
 		}
 
@@ -83,35 +97,8 @@ func (s *billState) retryCharges(ctx workflow.Context) error {
 	return nil
 }
 
-// runCharge runs one charge and leaves the bill CHARGED or CHARGE_FAILED. An empty bill owes
-// nothing, so it is never sent to the payment provider.
-func (s *billState) runCharge(ctx workflow.Context) {
-	if len(s.bill.Items) == 0 {
-		s.bill.Status = domain.StatusCharged
-
-		return
-	}
-
-	s.bill.ChargeAttempts++
-
-	var a *Activities
-	actx := workflow.WithActivityOptions(ctx, paymentActivityOptions)
-	req := payment.ChargeRequest{IdempotencyKey: s.bill.ID, CustomerID: s.bill.CustomerID, Amount: *s.bill.Total}
-	// The status changes only once the charge has answered: queries and waiting updates read it
-	// while the activity runs.
-	if err := workflow.ExecuteActivity(actx, a.Charge, req).Get(actx, nil); err != nil {
-		s.bill.Status = domain.StatusChargeFailed
-		s.bill.FailureReason = failureReason(err)
-
-		return
-	}
-
-	s.bill.Status = domain.StatusCharged
-	s.bill.FailureReason = ""
-}
-
 func (s *billState) validateRetry() error {
-	return retryRefusal(s.bill.Status, s.retryWindowClosed)
+	return retryRefusal(s.ledger.bill.Status, s.retryWindowClosed)
 }
 
 // retryRefusal decides whether a bill in status can be charged again; nil means it can. It answers
@@ -132,23 +119,15 @@ func retryRefusal(status domain.Status, windowClosed bool) error {
 // payment's own retries can take minutes.
 func (s *billState) requestRetry(ctx workflow.Context) (domain.Bill, error) {
 	s.retryRequested = true
-	err := workflow.Await(ctx, func() bool { return s.bill.Status != domain.StatusChargeFailed || s.retryWindowClosed })
+	err := workflow.Await(ctx, func() bool { return s.ledger.bill.Status != domain.StatusChargeFailed || s.retryWindowClosed })
 	if err != nil {
 		return domain.Bill{}, fmt.Errorf("await charge start: %w", err)
 	}
 
 	// Accepted as the window closed: no charge ran, so this is a refusal, not a started retry.
-	if s.bill.Status == domain.StatusChargeFailed {
-		return domain.Bill{}, retryRefusal(s.bill.Status, true)
+	if s.ledger.bill.Status == domain.StatusChargeFailed {
+		return domain.Bill{}, retryRefusal(s.ledger.bill.Status, true)
 	}
 
-	return s.bill, nil
-}
-
-func failureReason(err error) string {
-	if appErr, ok := errors.AsType[*temporal.ApplicationError](err); ok {
-		return appErr.Message()
-	}
-
-	return err.Error()
+	return s.ledger.bill, nil
 }

@@ -44,6 +44,11 @@ internal/services/payment/         Payment Service interface + stub
 - **`workflow/` never imports Encore.** A package that declares an Encore service only tests under `encore test`;
   keeping Temporal code apart lets plain `go test` run it, and lets it move to its own worker binary unchanged. The
   worker runs inside the Encore process for now (started in `initService`).
+- **Every change to a bill goes through the `ledger`** (`workflow/ledger.go`): pure, no `workflow.Context`. The
+  workflow decides when (timers, activities, handlers); the ledger decides what. A transition from the wrong status
+  panics — the workflow task retries and the bill keeps its last state until the fix ships, where a returned error
+  would fail the workflow for good. The workflow applies status changes through `billState.transition`, which keeps
+  the search attributes in step.
 - **Activities live in `workflow/activities.go`**, on an `Activities` struct holding `fx.Service` and
   `payment.Service`. The I/O boundary is those two packages, not a separate activities package.
 - `fx/` and `payment/` follow the service layout: `service.go` holds the `Service` interface, the types its
@@ -65,7 +70,7 @@ internal/services/payment/         Payment Service interface + stub
   `occurredAt` (defaults to `workflow.Now`). Explicit or defaulted, it must fall inside the period and not be more
   than `clockSkew` (5s) in the future. Same `id` + same
   payload → no-op returning the existing item; same `id` + different payload → conflict.
-- **Bill size is capped** (`maxLineItems`, `maxDescriptionLength`, `lineItemIDPattern` in `lineitem.go`) so the
+- **Bill size is capped** (`maxLineItems`, `maxDescriptionLength`, `lineItemIDPattern` in `ledger.go`) so the
   whole bill fits one 2 MB Temporal payload; `TestMaxBillFitsPayloadLimit` guards it. Raise a cap only with that test.
 - **Conversion happens at close**, using the daily rate for each item's `occurredAt` date, fetched in one activity
   batch. Each line is converted and rounded on its own; the total is the sum of converted lines.

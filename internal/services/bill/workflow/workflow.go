@@ -8,15 +8,13 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/rauf/fees-service/internal/models/domain"
-	"github.com/rauf/fees-service/internal/money"
 	"github.com/rauf/fees-service/internal/services/fx"
 )
 
+// billState is a bill's workflow run: the ledger, plus what only the workflow needs to know.
 type billState struct {
-	in   BillInput
-	bill domain.Bill
-	// index maps a line item ID to its position in bill.Items.
-	index   map[string]int
+	in      BillInput
+	ledger  ledger
 	closeCh workflow.ReceiveChannel
 	// closeRequested is set by the close update or signal. It always wins over continue-as-new:
 	// a close update waits for the total, which a run handing over would never produce.
@@ -77,7 +75,7 @@ func BillWorkflow(ctx workflow.Context, in BillInput) (domain.Bill, error) {
 		return domain.Bill{}, err
 	}
 
-	if s.bill.Status == domain.StatusChargeFailed &&
+	if s.ledger.bill.Status == domain.StatusChargeFailed &&
 		workflow.GetVersion(ctx, chargeRetryChange, workflow.DefaultVersion, 1) == 1 {
 		if err := s.retryCharges(ctx); err != nil {
 			return domain.Bill{}, err
@@ -88,7 +86,7 @@ func BillWorkflow(ctx workflow.Context, in BillInput) (domain.Bill, error) {
 		return domain.Bill{}, fmt.Errorf("await handlers: %w", err)
 	}
 
-	return s.bill, nil
+	return s.ledger.bill, nil
 }
 
 func newBillState(ctx workflow.Context, in BillInput) (*billState, error) {
@@ -96,43 +94,18 @@ func newBillState(ctx workflow.Context, in BillInput) (*billState, error) {
 		return nil, temporal.NewNonRetryableApplicationError("period is required", errTypeInvalidBill, nil)
 	}
 
-	s := &billState{
-		in:      in,
-		index:   map[string]int{},
-		closeCh: workflow.GetSignalChannel(ctx, signalClose),
-	}
-
+	s := &billState{in: in, closeCh: workflow.GetSignalChannel(ctx, signalClose)}
 	if in.Resume != nil {
-		s.bill = *in.Resume
-		for i, item := range s.bill.Items {
-			s.index[item.ID] = i
-		}
-
-		return s, nil
-	}
-
-	grace := in.GracePeriod
-	if grace == 0 {
-		grace = DefaultGracePeriod
-	}
-
-	s.bill = domain.Bill{
-		ID:            workflow.GetInfo(ctx).WorkflowExecution.ID,
-		CustomerID:    in.CustomerID,
-		Period:        in.Period,
-		Currency:      in.Currency,
-		Status:        domain.StatusOpen,
-		Items:         []domain.LineItem{},
-		Subtotals:     []money.Money{},
-		CreatedAt:     workflow.Now(ctx),
-		CloseDeadline: in.Period.End().Add(grace),
+		s.ledger = resumeLedger(*in.Resume)
+	} else {
+		s.ledger = newLedger(workflow.GetInfo(ctx).WorkflowExecution.ID, in, workflow.Now(ctx))
 	}
 
 	return s, nil
 }
 
 func (s *billState) registerHandlers(ctx workflow.Context) error {
-	if err := workflow.SetQueryHandler(ctx, queryGetBill, func() (domain.Bill, error) { return s.bill, nil }); err != nil {
+	if err := workflow.SetQueryHandler(ctx, queryGetBill, func() (domain.Bill, error) { return s.ledger.bill, nil }); err != nil {
 		return fmt.Errorf("register %s query: %w", queryGetBill, err)
 	}
 
@@ -163,21 +136,36 @@ func (s *billState) registerHandlers(ctx workflow.Context) error {
 	return nil
 }
 
+func (s *billState) validateLineItem(ctx workflow.Context, in domain.LineItemInput) error {
+	_, err := s.ledger.checkAdd(workflow.Now(ctx), in)
+
+	return err
+}
+
+func (s *billState) addLineItem(ctx workflow.Context, in domain.LineItemInput) (addLineItemResult, error) {
+	item, created, err := s.ledger.add(workflow.Now(ctx), in)
+	if err != nil {
+		return addLineItemResult{}, err
+	}
+
+	return addLineItemResult{Item: item, Created: created}, nil
+}
+
 // closeAndAwaitTotal requests the close and answers once the total is final, so the caller gets
 // what is being charged without polling. It does not wait for the charge itself.
 func (s *billState) closeAndAwaitTotal(ctx workflow.Context) (domain.Bill, error) {
 	s.closeRequested = true
-	if err := workflow.Await(ctx, func() bool { return s.bill.Total != nil }); err != nil {
+	if err := workflow.Await(ctx, func() bool { return s.ledger.bill.Total != nil }); err != nil {
 		return domain.Bill{}, fmt.Errorf("await total: %w", err)
 	}
 
-	return s.bill, nil
+	return s.ledger.bill, nil
 }
 
 // awaitClose blocks while the bill is open. It reports false when the run should continue as new
 // instead of closing.
 func (s *billState) awaitClose(ctx workflow.Context) (bool, error) {
-	wait := max(s.bill.CloseDeadline.Sub(workflow.Now(ctx)), 0)
+	wait := max(s.ledger.bill.CloseDeadline.Sub(workflow.Now(ctx)), 0)
 	inTime, err := workflow.AwaitWithTimeout(ctx, wait, func() bool {
 		return s.closeRequested || workflow.GetInfo(ctx).GetContinueAsNewSuggested()
 	})
@@ -214,7 +202,7 @@ func (s *billState) awaitClose(ctx workflow.Context) (bool, error) {
 
 func (s *billState) continueAsNew(ctx workflow.Context) (domain.Bill, error) {
 	next := s.in
-	bill := s.bill
+	bill := s.ledger.bill
 	next.Resume = &bill
 
 	return domain.Bill{}, workflow.NewContinueAsNewError(ctx, BillWorkflow, next)
@@ -223,14 +211,17 @@ func (s *billState) continueAsNew(ctx workflow.Context) (domain.Bill, error) {
 // close stops accepting line items, then converts every line into the bill's currency.
 func (s *billState) close(ctx workflow.Context) error {
 	now := workflow.Now(ctx)
-	s.bill.CloseReason = s.closeReason
-	s.bill.ClosedAt = &now
-	if err := s.setStatus(ctx, domain.StatusClosing); err != nil {
+	err := s.transition(ctx, func(l *ledger) error {
+		l.close(s.closeReason, now)
+
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 
 	var rates []fx.Rate
-	if reqs := rateRequests(s.bill); len(reqs) > 0 {
+	if reqs := s.ledger.rateRequests(); len(reqs) > 0 {
 		var a *Activities
 		actx := workflow.WithActivityOptions(ctx, fxActivityOptions)
 		if err := workflow.ExecuteActivity(actx, a.GetDailyRates, reqs).Get(actx, &rates); err != nil {
@@ -238,22 +229,34 @@ func (s *billState) close(ctx workflow.Context) error {
 		}
 	}
 
-	total, err := applyConversions(&s.bill, rates)
-	if err != nil {
-		return fmt.Errorf("convert bill: %w", err)
-	}
+	return s.transition(ctx, func(l *ledger) error {
+		if _, err := l.convert(rates); err != nil {
+			return fmt.Errorf("convert bill: %w", err)
+		}
 
-	s.bill.Total = &total
-
-	return s.setStatus(ctx, domain.StatusCharging, searchAttrTotal.ValueSet(total.AmountMinor))
+		return nil
+	})
 }
 
-// setStatus moves the bill to status and keeps its search attributes in step.
-func (s *billState) setStatus(ctx workflow.Context, status domain.Status, extra ...temporal.SearchAttributeUpdate) error {
-	s.bill.Status = status
-	updates := append([]temporal.SearchAttributeUpdate{searchAttrStatus.ValueSet(string(status))}, extra...)
+// transition applies f to the ledger and, when the status changed, upserts BillStatus — and
+// BillTotal the moment a total appears — so search attributes never fall behind the bill.
+func (s *billState) transition(ctx workflow.Context, f func(*ledger) error) error {
+	status, hadTotal := s.ledger.bill.Status, s.ledger.bill.Total != nil
+	if err := f(&s.ledger); err != nil {
+		return err
+	}
+
+	if s.ledger.bill.Status == status {
+		return nil
+	}
+
+	updates := []temporal.SearchAttributeUpdate{searchAttrStatus.ValueSet(string(s.ledger.bill.Status))}
+	if total := s.ledger.bill.Total; total != nil && !hadTotal {
+		updates = append(updates, searchAttrTotal.ValueSet(total.AmountMinor))
+	}
+
 	if err := workflow.UpsertTypedSearchAttributes(ctx, updates...); err != nil {
-		return fmt.Errorf("upsert search attributes for %s: %w", status, err)
+		return fmt.Errorf("upsert search attributes for %s: %w", s.ledger.bill.Status, err)
 	}
 
 	return nil
