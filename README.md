@@ -3,14 +3,7 @@
 A fees API built on [Encore](https://encore.dev) and [Temporal](https://temporal.io). Each customer's monthly bill is
 one Temporal workflow: it opens for a month, accrues line items as fees happen, and on close converts every line into
 the bill's currency, totals it and charges the customer. Temporal is the store of state — there is no bills table.
-
-- [Running locally](#running-locally)
-- [Walkthrough](#walkthrough)
-- [API](#api)
-- [Design](#design)
-- [Assumptions](#assumptions)
-- [What production would add](#what-production-would-add)
-- [Layout](#layout)
+[AGENTS.md](AGENTS.md) records the code's conventions and invariants.
 
 ## Running locally
 
@@ -25,9 +18,9 @@ make smoke   # end-to-end tests over HTTP against the running app — the walkth
 make lint    # golangci-lint v2.15+
 ```
 
-The spec suggests Temporalite; it has been archived and folded into the Temporal CLI's `temporal server start-dev`,
-which `make up` runs in Docker. It registers the bill search attributes and sets the namespace's retention to 365
-days, so completed bills stay queryable. Set `TEMPORAL_ADDRESS` to point the app elsewhere.
+The spec suggests Temporalite, now archived into the Temporal CLI's `temporal server start-dev`; `make up` runs that in
+Docker, registers the bill search attributes and sets retention to 365 days, so completed bills stay queryable. Set
+`TEMPORAL_ADDRESS` to point the app elsewhere.
 
 ## Walkthrough
 
@@ -71,7 +64,7 @@ All amounts are decimal strings (`"12.50"`), never JSON numbers.
 | Endpoint | Does | Success | Errors |
 |---|---|---|---|
 | `POST /bills` | Open a bill: `customerId`, `period` (`YYYY-MM`, UTC), `currency` | `201`; an identical retry `200` | `400` invalid input or a past month; `409` the bill exists in another currency or has finished |
-| `POST /bills/:id/line-items` | Add a fee: `id` (`[A-Za-z0-9._:-]`, ≤ 128), `description` (≤ 200 characters), `amount`, `currency`, optional `occurredAt` | `201` with the item; an identical retry `200` | `400` invalid, bill not open, or bill at 1,000 items; `409` `id` reused with different details; `404` |
+| `POST /bills/:id/line-items` | Add a fee: `id` (`[A-Za-z0-9._:-]`, ≤ 128; the idempotency key), `description` (≤ 200 characters), `amount` (> 0), `currency`, optional `occurredAt` (defaults to now; within the bill's month, at most 5s in the future) | `201` with the item; an identical retry `200` with the existing item, even after close | `400` invalid, bill not open, or bill at 1,000 items; `409` `id` reused with different details; `404` |
 | `POST /bills/:id/close` | Close the bill; answers once the total is final, before the charge | `200` with total and converted lines; `202` if the total is not ready within 10s | `404` |
 | `POST /bills/:id/close?async=true` | Signal the close and return at once, for batch closers | `202` with the bill as it stands | `404` |
 | `POST /bills/:id/charge` | Charge a `CHARGE_FAILED` bill again now, without waiting for its next automatic retry | `202` once the charge has started | `400` the bill is not `CHARGE_FAILED` or its retry window has closed; `404` |
@@ -79,7 +72,9 @@ All amounts are decimal strings (`"12.50"`), never JSON numbers.
 | `GET /bills` | Summaries; optional `customerId`, `status`, `period`, `currency`, `pageSize` (≤ 100), `pageToken` | `200` | `400` invalid filter |
 
 A bill's ID is `bill:{customerId}:{period}`. Its status runs `OPEN → CLOSING → CHARGING → CHARGED | CHARGE_FAILED`,
-and a `CHARGE_FAILED` bill goes back to `CHARGING` on each retry; line items are accepted only while `OPEN`.
+and a `CHARGE_FAILED` bill goes back to `CHARGING` on each retry; line items are accepted only while `OPEN`. A late
+fee for last month goes on last month's bill, with its own `occurredAt`, while that bill is still open in its grace
+period; a bill for a future month takes items only once that month starts.
 
 ## Design
 
@@ -108,14 +103,12 @@ sequenceDiagram
 plus a reject-duplicate reuse policy — guarantees one bill per customer per month and makes create idempotent with
 no extra lookup.
 
-**Updates where the caller needs an answer, a Signal where it does not, Queries to read.** A signal cannot answer:
-the caller only learns it was delivered. Adding a line item has to be refusable — "reject a line item on a closed
-bill" — so it is an Update whose validator rejects synchronously, with a real `400`/`409`, and a rejected update
-never enters history; query-then-signal would race a close landing in between. Closing has to report the total being
-charged, so the default close is an Update too: its handler marks the bill for closing and answers once the rates are
-in and the total is final — no polling, one round trip. The month-end close the spec describes as *signalling* stays a
-signal, `?async=true`: a batch job closing every customer's bill wants to fire and move on, not wait on each. Both
-set the same flag, and closing twice is harmless.
+**Updates where the caller needs an answer, a Signal where it does not, Queries to read.** A signal only reports
+delivery. Adding a line item must be refusable on a closed bill, so it is an Update whose validator rejects
+synchronously with a real `400`/`409`; a rejected update never enters history, and query-then-signal would race a
+close landing in between. The default close is an Update too, answering once the rates are in and the total is final —
+one round trip, no polling. The spec's *signalled* month-end close stays a Signal (`?async=true`) for batch jobs that
+fire and move on. Both set the same flag, so closing twice is harmless.
 
 **Closing.** The caller decides when a month's usage is complete, so an explicit close is the normal path; a bill can
 also close early. A pending close always wins over continue-as-new: a close update waits for a total that a run handing
@@ -137,36 +130,26 @@ published daily rate does not change, so fetching late gives the same number whi
 off the path of capturing a fee. Each line is rounded on its own and the total is the sum of the lines, so the
 statement always adds up. The rates are recorded in history, so a replay converts identically.
 
-**Line item dates.** `occurredAt` defaults to when the item is added, and either way it must fall inside the bill's
-month and not in the future (allowing 5 seconds of clock skew). A late fee for last month is added with its own
-`occurredAt`; a bill for a future month takes items only once that month starts.
-
-**Idempotency.** Line item IDs are the caller's idempotency keys: a retry with the same payload returns the item
-already on the bill — even after the bill has closed, so a retry gets the answer the original got — and the same ID
-with different details is a conflict. The bill ID is the payment idempotency key, so a charge retried after a lost
-acknowledgement does not charge twice.
-
 **Failure and retrying a charge.** Each charge retries five times with backoff; a decline is not retried within it.
 A failed charge leaves the bill `CHARGE_FAILED` but keeps the workflow open: a decline at month end is usually
-insufficient funds, which days fix. The workflow charges again automatically 1, 3 and 7 days after the first failure,
-and `POST /bills/:id/charge` charges again at once — after a customer tops up, say. Both run the same code; the bill ID
-stays the payment's idempotency key, so a retry after an ambiguous timeout — the provider took the money, the answer was
-lost — finds the earlier charge rather than taking it twice. Thirty days after the first failure the workflow completes
-with the bill still `CHARGE_FAILED`, its result readable rather than buried in a failed workflow. Bills that failed
-before retries existed replay without them, behind `workflow.GetVersion`. The exchange-rate lookup retries
-indefinitely, since a rate will exist.
+insufficient funds, which days fix. The workflow charges again 1, 3 and 7 days after the first failure, and
+`POST /bills/:id/charge` charges at once — after a customer tops up, say. The bill ID is the payment's idempotency
+key, so a retry after an ambiguous timeout (the provider took the money, the answer was lost) finds the earlier
+charge rather than taking it twice. Thirty days after the first failure the workflow completes with the bill still
+`CHARGE_FAILED`, its result readable rather than buried in a failed workflow. Bills that failed before retries existed
+replay without them, behind `workflow.GetVersion`. The exchange-rate lookup retries indefinitely, since a rate will
+exist.
 
 **Reads go through the worker.** A query replays the bill's history on a worker, so `GET` needs the worker up — here
 it runs in the API process, so they fail together.
 
-**Bill size.** Everything a workflow sends or receives is a payload in its history, and Temporal fails any workflow
-task that produces a payload over 2 MB. So an add answers with the one item, not the bill: answering with the bill
-made history grow with the square of the item count (100 items took 1.2 MB of history; now 0.1 MB), and once the bill
-passed 2 MB every add, and the close update, failed. The bill itself still travels whole — as the continue-as-new
-input, the query result and the close answer — so it is capped: 1,000 items, IDs of at most 128 safe characters,
+**Bill size.** Temporal fails any workflow task that produces a payload over 2 MB. An add answers with the one item,
+not the bill: answering with the bill grew history with the square of the item count (100 items took 1.2 MB; now
+0.1 MB) and, past 2 MB, failed every add and the close. The bill still travels whole — as the continue-as-new input,
+the query result and the close answer — so it is capped: 1,000 items, IDs of at most 128 safe characters,
 descriptions of at most 200 characters. A test builds the largest bill these allow and checks it fits (about 1.7 MB).
-A customer needing more lines a month would need the items held outside workflow state. History is still trimmed by
-continuing as new when Temporal suggests it, carrying the bill.
+More lines a month would need the items held outside workflow state. History is trimmed by continuing as new when
+Temporal suggests it, carrying the bill.
 
 **Listing** reads visibility (search attributes `CustomerID`, `BillStatus`, `BillPeriod`, `BillCurrency`,
 `BillTotal`), so a page of summaries costs one call rather than one query per bill. It is eventually consistent: a
@@ -178,10 +161,8 @@ reach the visibility query.
 - Callers are trusted internal services, so the endpoints are unauthenticated; customers never call this API.
 - A period is a UTC calendar month. Only the current or a future month can be opened.
 - Fees are positive. Credits and refunds would be a separate line type.
-- A bill holds at most 1,000 line items a month; see [Bill size](#design).
 - The FX and payment providers are stubs: a fixed USD/GEL rate of 2.70 for every date, and a provider that accepts
   every charge except for `cus_decline*` customers.
-- The Temporal worker runs inside the API process.
 
 ## What production would add
 
@@ -197,19 +178,3 @@ reach the visibility query.
 - **Service authentication** (mTLS or Encore auth handlers) and per-customer billing currency from the customer
   service rather than the request.
 - **Reconciliation** of `CHARGE_FAILED` bills against the provider, and dunning beyond the 30-day window.
-
-## Layout
-
-```
-internal/api/bill/               Encore service: endpoints, error mapping, starts the worker
-internal/services/bill/workflow/ BillWorkflow; the ledger (every rule that changes a bill); Bills (the Temporal
-                                 client the API calls); activities
-internal/services/fx/            exchange-rate service interface + fixed-rate stub
-internal/services/payment/       payment service interface + stub
-internal/models/domain/          Bill, LineItem, Conversion, Period — the state Temporal stores
-internal/models/api/             HTTP request and response types
-internal/adapters/               domain ↔ API mapping
-internal/money/                  Money, parsing, formatting, conversion
-```
-
-[AGENTS.md](AGENTS.md) records the conventions and invariants in more detail.
