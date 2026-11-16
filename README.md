@@ -141,9 +141,9 @@ statement always adds up. The rates are recorded in history, so a replay convert
 month and not in the future (allowing 5 seconds of clock skew). A late fee for last month is added with its own
 `occurredAt`; a bill for a future month takes items only once that month starts.
 
-**Idempotency.** Line item IDs are the caller's idempotency keys: a retry with the same payload returns the bill
-unchanged — even after the bill has closed, so a retry gets the answer the original got — and the same ID with
-different details is a conflict. The bill ID is the payment idempotency key, so a charge retried after a lost
+**Idempotency.** Line item IDs are the caller's idempotency keys: a retry with the same payload returns the item
+already on the bill — even after the bill has closed, so a retry gets the answer the original got — and the same ID
+with different details is a conflict. The bill ID is the payment idempotency key, so a charge retried after a lost
 acknowledgement does not charge twice.
 
 **Failure and retrying a charge.** Each charge retries five times with backoff; a decline is not retried within it.
@@ -153,8 +153,8 @@ and `POST /bills/:id/charge` charges again at once — after a customer tops up,
 stays the payment's idempotency key, so a retry after an ambiguous timeout — the provider took the money, the answer was
 lost — finds the earlier charge rather than taking it twice. Thirty days after the first failure the workflow completes
 with the bill still `CHARGE_FAILED`, its result readable rather than buried in a failed workflow. Bills that failed
-before retries existed replay without them, behind `workflow.GetVersion` — the replay test caught that. The
-exchange-rate lookup retries indefinitely, since a rate will exist.
+before retries existed replay without them, behind `workflow.GetVersion`. The exchange-rate lookup retries
+indefinitely, since a rate will exist.
 
 **Reads go through the worker.** A query replays the bill's history on a worker, so `GET` needs the worker up — here
 it runs in the API process, so they fail together.
@@ -186,14 +186,14 @@ reach the visibility query.
 ## What production would add
 
 - **Durable invoices.** Retention eventually deletes completed workflows, so a closed bill would be written to a
-  ledger or database by a final activity; Temporal then holds only bills in flight.
+  database by a final activity; Temporal then holds only bills in flight.
 - **A separate worker deployment**, so API and worker scale and deploy independently. The workflow package has no
   Encore dependency, so it moves to its own binary unchanged.
 - **Versioning.** A bill runs for a month, so changing its logic needs `workflow.GetVersion` or worker versioning.
   `TestReplay` already replays recorded histories (`make replay/record`); production would record them from real
   traffic.
 - **Real providers** behind `fx.Service` (the National Bank of Georgia publishes an official daily GEL rate) and
-  `payment.Service`, plus dunning for `CHARGE_FAILED` bills.
+  `payment.Service`.
 - **Service authentication** (mTLS or Encore auth handlers) and per-customer billing currency from the customer
   service rather than the request.
 - **Reconciliation** of `CHARGE_FAILED` bills against the provider, and dunning beyond the 30-day window.
@@ -201,11 +201,12 @@ reach the visibility query.
 ## Layout
 
 ```
-internal/api/bill/               Encore service: endpoints, error mapping, Temporal client and worker
-internal/services/bill/workflow/ BillWorkflow, activities, line-item validation, close-time conversion
+internal/api/bill/               Encore service: endpoints, error mapping, starts the worker
+internal/services/bill/workflow/ BillWorkflow; the ledger (every rule that changes a bill); Bills (the Temporal
+                                 client the API calls); activities
 internal/services/fx/            exchange-rate service interface + fixed-rate stub
 internal/services/payment/       payment service interface + stub
-internal/models/domain/          Bill, LineItem, Conversion — the state Temporal stores
+internal/models/domain/          Bill, LineItem, Conversion, Period — the state Temporal stores
 internal/models/api/             HTTP request and response types
 internal/adapters/               domain ↔ API mapping
 internal/money/                  Money, parsing, formatting, conversion
