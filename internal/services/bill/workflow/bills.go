@@ -223,12 +223,19 @@ func (b *Bills) addToFinished(ctx context.Context, id string, in domain.LineItem
 		return domain.LineItem{}, false, err
 	}
 
-	item, err := checkAddToFinished(bill, in)
+	// A completed workflow's bill is past OPEN, so the ledger answers as the validator would have:
+	// the item already there on an identical retry, a refusal otherwise.
+	l := resumeLedger(bill)
+	existing, err := l.checkAdd(b.now(), in)
 	if err != nil {
 		return domain.LineItem{}, false, billsError("add line item to "+id, err)
 	}
 
-	return item, false, nil
+	if existing == nil {
+		return domain.LineItem{}, false, fmt.Errorf("add line item to %s: completed bill is still %s", id, bill.Status)
+	}
+
+	return *existing, false, nil
 }
 
 // billsError turns a Temporal failure into a sentinel carrying only the public message. Anything
