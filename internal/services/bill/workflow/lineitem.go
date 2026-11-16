@@ -32,10 +32,10 @@ const (
 // lineItemIDPattern bounds the ID's size and keeps it free of characters JSON would escape.
 var lineItemIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 
-// CheckAddToFinished decides an add to a bill whose workflow has completed, where the update
+// checkAddToFinished decides an add to a bill whose workflow has completed, where the update
 // validator can no longer answer. It gives the same answer the validator would have, and the
 // existing item on an identical retry.
-func CheckAddToFinished(bill domain.Bill, in domain.LineItemInput) (domain.LineItem, error) {
+func checkAddToFinished(bill domain.Bill, in domain.LineItemInput) (domain.LineItem, error) {
 	for _, item := range bill.Items {
 		if item.ID == in.ID {
 			return item, checkRetry(item, in)
@@ -61,7 +61,7 @@ func (s *billState) checkAdd(now time.Time, in domain.LineItemInput) error {
 	}
 
 	if err := s.checkLineItem(now, in); err != nil {
-		return temporal.NewApplicationError(err.Error(), ErrTypeInvalidLineItem)
+		return temporal.NewApplicationError(err.Error(), errTypeInvalidLineItem)
 	}
 
 	return nil
@@ -113,14 +113,14 @@ func (s *billState) checkLineItem(now time.Time, in domain.LineItemInput) error 
 	return nil
 }
 
-func (s *billState) addLineItem(ctx workflow.Context, in domain.LineItemInput) (AddLineItemResult, error) {
+func (s *billState) addLineItem(ctx workflow.Context, in domain.LineItemInput) (addLineItemResult, error) {
 	if i, ok := s.index[in.ID]; ok {
-		return AddLineItemResult{Item: s.bill.Items[i]}, nil
+		return addLineItemResult{Item: s.bill.Items[i]}, nil
 	}
 
 	subtotal, err := s.subtotal(in.Amount.Currency).Add(in.Amount)
 	if err != nil {
-		return AddLineItemResult{}, fmt.Errorf("add line item %q: %w", in.ID, err)
+		return addLineItemResult{}, fmt.Errorf("add line item %q: %w", in.ID, err)
 	}
 
 	now := workflow.Now(ctx)
@@ -140,7 +140,7 @@ func (s *billState) addLineItem(ctx workflow.Context, in domain.LineItemInput) (
 	s.index[in.ID] = len(s.bill.Items)
 	s.bill.Items = append(s.bill.Items, item)
 
-	return AddLineItemResult{Item: item, Created: true}, nil
+	return addLineItemResult{Item: item, Created: true}, nil
 }
 
 func (s *billState) subtotal(c money.Currency) money.Money {
@@ -176,9 +176,9 @@ func checkRetry(item domain.LineItem, in domain.LineItemInput) error {
 	}
 
 	return temporal.NewApplicationError(
-		fmt.Sprintf("line item %q already exists with different details", in.ID), ErrTypeLineItemConflict)
+		fmt.Sprintf("line item %q already exists with different details", in.ID), errTypeLineItemConflict)
 }
 
 func billClosedError(status domain.Status) error {
-	return temporal.NewApplicationError(fmt.Sprintf("bill is %s", status), ErrTypeBillClosed)
+	return temporal.NewApplicationError(fmt.Sprintf("bill is %s", status), errTypeBillClosed)
 }

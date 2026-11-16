@@ -93,13 +93,13 @@ func BillWorkflow(ctx workflow.Context, in BillInput) (domain.Bill, error) {
 
 func newBillState(ctx workflow.Context, in BillInput) (*billState, error) {
 	if in.Period.IsZero() {
-		return nil, temporal.NewNonRetryableApplicationError("period is required", ErrTypeInvalidBill, nil)
+		return nil, temporal.NewNonRetryableApplicationError("period is required", errTypeInvalidBill, nil)
 	}
 
 	s := &billState{
 		in:      in,
 		index:   map[string]int{},
-		closeCh: workflow.GetSignalChannel(ctx, SignalClose),
+		closeCh: workflow.GetSignalChannel(ctx, signalClose),
 	}
 
 	if in.Resume != nil {
@@ -132,24 +132,24 @@ func newBillState(ctx workflow.Context, in BillInput) (*billState, error) {
 }
 
 func (s *billState) registerHandlers(ctx workflow.Context) error {
-	if err := workflow.SetQueryHandler(ctx, QueryGetBill, func() (domain.Bill, error) { return s.bill, nil }); err != nil {
-		return fmt.Errorf("register %s query: %w", QueryGetBill, err)
+	if err := workflow.SetQueryHandler(ctx, queryGetBill, func() (domain.Bill, error) { return s.bill, nil }); err != nil {
+		return fmt.Errorf("register %s query: %w", queryGetBill, err)
 	}
 
-	err := workflow.SetUpdateHandlerWithOptions(ctx, UpdateAddLineItem, s.addLineItem,
+	err := workflow.SetUpdateHandlerWithOptions(ctx, updateAddLineItem, s.addLineItem,
 		workflow.UpdateHandlerOptions{Validator: s.validateLineItem})
 	if err != nil {
-		return fmt.Errorf("register %s update: %w", UpdateAddLineItem, err)
+		return fmt.Errorf("register %s update: %w", updateAddLineItem, err)
 	}
 
-	if err := workflow.SetUpdateHandler(ctx, UpdateClose, s.closeAndAwaitTotal); err != nil {
-		return fmt.Errorf("register %s update: %w", UpdateClose, err)
+	if err := workflow.SetUpdateHandler(ctx, updateClose, s.closeAndAwaitTotal); err != nil {
+		return fmt.Errorf("register %s update: %w", updateClose, err)
 	}
 
-	err = workflow.SetUpdateHandlerWithOptions(ctx, UpdateRetryCharge, s.requestRetry,
+	err = workflow.SetUpdateHandlerWithOptions(ctx, updateRetryCharge, s.requestRetry,
 		workflow.UpdateHandlerOptions{Validator: s.validateRetry})
 	if err != nil {
-		return fmt.Errorf("register %s update: %w", UpdateRetryCharge, err)
+		return fmt.Errorf("register %s update: %w", updateRetryCharge, err)
 	}
 
 	// Drained for the workflow's lifetime, so a repeated close is a no-op rather than a buffered signal.
@@ -245,13 +245,13 @@ func (s *billState) close(ctx workflow.Context) error {
 
 	s.bill.Total = &total
 
-	return s.setStatus(ctx, domain.StatusCharging, SearchAttrTotal.ValueSet(total.AmountMinor))
+	return s.setStatus(ctx, domain.StatusCharging, searchAttrTotal.ValueSet(total.AmountMinor))
 }
 
 // setStatus moves the bill to status and keeps its search attributes in step.
 func (s *billState) setStatus(ctx workflow.Context, status domain.Status, extra ...temporal.SearchAttributeUpdate) error {
 	s.bill.Status = status
-	updates := append([]temporal.SearchAttributeUpdate{SearchAttrStatus.ValueSet(string(status))}, extra...)
+	updates := append([]temporal.SearchAttributeUpdate{searchAttrStatus.ValueSet(string(status))}, extra...)
 	if err := workflow.UpsertTypedSearchAttributes(ctx, updates...); err != nil {
 		return fmt.Errorf("upsert search attributes for %s: %w", status, err)
 	}

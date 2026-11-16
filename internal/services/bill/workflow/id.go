@@ -11,14 +11,14 @@ import (
 // customerIDPattern excludes ':' so a bill ID splits unambiguously.
 var customerIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// BillID is the workflow ID of a customer's bill for a period; one bill per customer per month.
-func BillID(customerID string, period domain.Period) string {
+// billID is the workflow ID of a customer's bill for a period; one bill per customer per month.
+func billID(customerID string, period domain.Period) string {
 	return "bill:" + customerID + ":" + period.String()
 }
 
-// ValidateNew reports whether a bill can be opened at now: only for the current or a future month.
-func ValidateNew(in BillInput, now time.Time) error {
-	if !ValidCustomerID(in.CustomerID) {
+// validateNew reports whether a bill can be opened at now: only for the current or a future month.
+func validateNew(in BillInput, now time.Time) error {
+	if !validCustomerID(in.CustomerID) {
 		return fmt.Errorf("%w: customerId must match %s", ErrInvalidBill, customerIDPattern)
 	}
 
@@ -41,8 +41,8 @@ func ValidateNew(in BillInput, now time.Time) error {
 	return nil
 }
 
-// ValidCustomerID reports whether id can name a customer in a bill ID.
-func ValidCustomerID(id string) bool {
+// validCustomerID reports whether id can name a customer in a bill ID.
+func validCustomerID(id string) bool {
 	return customerIDPattern.MatchString(id)
 }
 

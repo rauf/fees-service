@@ -13,7 +13,7 @@ import (
 )
 
 func TestBillID(t *testing.T) {
-	assert.Equal(t, "bill:cus_42:2026-11", BillID("cus_42", nov2026))
+	assert.Equal(t, "bill:cus_42:2026-11", billID("cus_42", nov2026))
 }
 
 func TestValidateNew(t *testing.T) {
@@ -40,7 +40,7 @@ func TestValidateNew(t *testing.T) {
 			in := valid
 			tc.mutate(&in)
 
-			err := ValidateNew(in, now)
+			err := validateNew(in, now)
 			if tc.wantErr == "" {
 				require.NoError(t, err)
 
